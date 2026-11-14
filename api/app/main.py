@@ -1,3 +1,4 @@
+import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -15,3 +16,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(health.router)
+if __name__ == '__main__':
+    print("Hello from api!")
+    uvicorn.run("app.main:app", host="127.0.0.1", port=8000, reload=True)
