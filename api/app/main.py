@@ -1,13 +1,13 @@
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
-from app.api.routes import health
-from app.core.config import get_settings
-
+from app.api.routes import auth, health, products, promotion_links, stores, users, workspace
+from app.core.config import API_DIR, get_settings
 
 settings = get_settings()
-app = FastAPI(title=settings.app_name)
+app = FastAPI(title=settings.app_name + " 基础业务")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -15,8 +15,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 app.include_router(health.router)
-# uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+for route in [auth, products, promotion_links, stores, users, workspace]:
+    app.include_router(route.router, prefix="/api/v1")
+
+uploads_dir = API_DIR / "uploads"
+uploads_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=uploads_dir), name="uploads")
+
 if __name__ == '__main__':
     print("Hello from api!")
     uvicorn.run("app.main:app", host="127.0.0.1", port=8000, reload=True)
