@@ -10,6 +10,8 @@ API_DIR = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=API_DIR / ".env", env_file_encoding="utf-8", extra="ignore")
+
     app_name: str = "Ecommerce Operation Assistant API"
     app_env: str = Field(default="development", alias="APP_ENV")
     database_url: str = Field(..., alias="DATABASE_URL")
@@ -52,8 +54,6 @@ class Settings(BaseSettings):
     video_workspace_id: str | None = Field(default=None, alias="VIDEO_WORKSPACE_ID")
     video_poll_interval_seconds: int = Field(default=10, alias="VIDEO_POLL_INTERVAL_SECONDS")
     video_poll_max_attempts: int = Field(default=36, alias="VIDEO_POLL_MAX_ATTEMPTS")
-
-    model_config = SettingsConfigDict(env_file=API_DIR / ".env", env_file_encoding="utf-8", extra="ignore")
 
     @property
     def cors_origins(self) -> list[str]:
