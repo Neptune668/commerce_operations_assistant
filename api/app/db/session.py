@@ -10,10 +10,9 @@ settings = get_settings()
 engine = create_engine(settings.database_url, pool_pre_ping=True, pool_recycle=3600)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-
-def get_db() -> Generator[Session, None, None]:
-    db = SessionLocal()
+def get_db() -> Generator[Session,None,None]:
     try:
-        yield db
+        session = SessionLocal()
+        yield session
     finally:
-        db.close()
+        session.close()
