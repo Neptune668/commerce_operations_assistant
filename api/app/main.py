@@ -24,6 +24,7 @@ uploads_dir = API_DIR / "uploads"
 uploads_dir.mkdir(parents=True, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=uploads_dir), name="uploads")
 
+# uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 if __name__ == '__main__':
     print("Hello from api!")
     uvicorn.run("app.main:app", host="127.0.0.1", port=8000, reload=True)
