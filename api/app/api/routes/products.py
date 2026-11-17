@@ -91,6 +91,14 @@ from app.services.review import enrich_performance_metrics, generate_review as b
 from app.services.ad_recommendations import generate_ad_recommendation as build_ad_recommendation
 from app.services.ad_experiments import build_ad_experiment_payload
 
+from app.services.generation_jobs import (
+    cancel_generation_job_record,
+    dispatch_generation_job,
+    enqueue_generation_job,
+    retry_generation_job_record,
+)
+
+
 router = APIRouter(prefix="/products", tags=["products"])
 
 SessionDep = Annotated[Session, Depends(get_db)]
@@ -776,7 +784,25 @@ def generate_creative_plan_image(
     db: SessionDep,
     _current_user: Annotated[User, Depends(require_edit_permission)],
 ) -> GenerationJob:
-    raise HTTPException(status_code=501, detail="本阶段尚未接入，请完成后续大模型或 Agent 章节。")
+    """提交一条主图生成任务，校验通过后返回 202 与任务记录。"""
+    get_product_or_404(db, product_id)   # 1.检查商品是否存在，2.判断商品的workspace_id和当前用户的workspace_id是否一致
+    creative_plan = db.get(CreativePlan, creative_plan_id)
+    if creative_plan is None or creative_plan.product_id != product_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Creative plan not found")
+    if creative_plan.type != CreativePlanType.MAIN_IMAGE:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Creative plan is not a main image plan")
+
+    job = enqueue_generation_job(
+        db,
+        product_id=product_id,
+        creative_plan_id=creative_plan_id,
+        kind=GenerationJobKind.MAIN_IMAGE_ASSET,
+    )
+    db.commit()
+    db.refresh(job)
+    # 接口返回 202 与任务记录，素材生成异步执行，可在工作台等待、取消或重试。
+    dispatch_generation_job(job.id, background_tasks)
+    return job
 
 
 @router.post(
@@ -791,7 +817,23 @@ def generate_creative_plan_video(
     db: SessionDep,
     _current_user: Annotated[User, Depends(require_edit_permission)],
 ) -> GenerationJob:
-    raise HTTPException(status_code=501, detail="本阶段尚未接入，请完成后续大模型或 Agent 章节。")
+    get_product_or_404(db, product_id)
+    creative_plan = db.get(CreativePlan, creative_plan_id)
+    if creative_plan is None or creative_plan.product_id != product_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Creative plan not found")
+    if creative_plan.type != CreativePlanType.VIDEO_SCRIPT:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Creative plan is not a video script")
+
+    job = enqueue_generation_job(
+        db,
+        product_id=product_id,
+        creative_plan_id=creative_plan_id,
+        kind=GenerationJobKind.VIDEO_ASSET,
+    )
+    db.commit()
+    db.refresh(job)
+    dispatch_generation_job(job.id, background_tasks)
+    return job
 
 
 @router.post(
@@ -806,7 +848,21 @@ def retry_generation_job(
     db: SessionDep,
     _current_user: Annotated[User, Depends(require_edit_permission)],
 ) -> GenerationJob:
-    raise HTTPException(status_code=501, detail="本阶段尚未接入，请完成后续大模型或 Agent 章节。")
+    get_product_or_404(db, product_id)
+    job = db.get(GenerationJob, job_id)
+    if job is None or job.product_id != product_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Generation job not found")
+    if job.status in {GenerationJobStatus.PENDING, GenerationJobStatus.RUNNING}:
+        # 已在队列或执行中的任务保持幂等返回，避免重复点击造成多条生成请求。
+        return job
+    if job.status != GenerationJobStatus.FAILED:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only failed jobs can be retried")
+
+    retry_generation_job_record(job)
+    db.commit()
+    db.refresh(job)
+    dispatch_generation_job(job.id, background_tasks)
+    return job
 
 
 @router.post(
@@ -819,8 +875,19 @@ def cancel_generation_job(
     db: SessionDep,
     _current_user: Annotated[User, Depends(require_edit_permission)],
 ) -> GenerationJob:
-    raise HTTPException(status_code=501, detail="本阶段尚未接入，请完成后续大模型或 Agent 章节。")
+    """取消一条尚未结束的生成任务。"""
+    # 先完成认证与资源归属校验，再进入会产生副作用的服务调用。
+    get_product_or_404(db, product_id)
+    job = db.get(GenerationJob, job_id)
+    if job is None or job.product_id != product_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Generation job not found")
 
+    result:bool =  cancel_generation_job_record(job, reason="用户取消生成任务。")
+    if not result:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only pending or running jobs can be cancelled")
+    db.commit()
+    db.refresh(job)
+    return job
 
 @router.post(
     "/{product_id}/creative-plans/main-images/generate",
