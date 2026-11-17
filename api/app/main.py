@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from app.api.routes import auth, health, products, promotion_links, stores, users, workspace
+from app.api.routes import auth, health, products, promotion_links, stores, users, workspace, model_settings
 from app.core.config import API_DIR, get_settings
 
 settings = get_settings()
@@ -17,14 +17,16 @@ app.add_middleware(
 )
 
 app.include_router(health.router)
-for route in [auth, products, promotion_links, stores, users, workspace]:
+for route in [auth, products, promotion_links, stores, users, workspace,model_settings]:
     app.include_router(route.router, prefix="/api/v1")
 
 uploads_dir = API_DIR / "uploads"
 uploads_dir.mkdir(parents=True, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=uploads_dir), name="uploads")
 
-# uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 if __name__ == '__main__':
     print("Hello from api!")
     uvicorn.run("app.main:app", host="127.0.0.1", port=8000, reload=True)
+
+
+# uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
