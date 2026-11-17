@@ -23,7 +23,7 @@ from app.schemas import (
     StoreRead,
     StoreUpdate,
 )
-
+from app.services.inventory_advice import generate_inventory_advice
 
 router = APIRouter(prefix="/stores", tags=["stores"])
 SessionDep = Annotated[Session, Depends(get_db)]
@@ -127,7 +127,9 @@ def generate_store_inventory_advice(
     db: SessionDep,
     _current_user: Annotated[User, Depends(require_edit_permission)],
 ) -> StoreInventoryAdviceRead:
-    raise HTTPException(status_code=501, detail="本阶段尚未接入，请完成后续大模型或 Agent 章节。")
+    store = get_store_or_404(db, store_id)
+    rows = build_store_inventory_rows(db, store_id)
+    return StoreInventoryAdviceRead.model_validate(generate_inventory_advice(store, rows))
 
 
 @router.get("/{store_id}/inventory-movements", response_model=list[StoreInventoryMovementRow])
