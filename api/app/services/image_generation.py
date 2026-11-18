@@ -285,7 +285,7 @@ def _extract_jimeng_image_url(data: dict[str, Any]) -> str:
 if __name__ == '__main__':
     with SessionLocal() as db:
         creative_plan = db.scalars(
-            select(CreativePlan).where(CreativePlan.id == 1)
+            select(CreativePlan).where(CreativePlan.id == 7)
         ).first()
 
         result = generate_main_image_asset(creative_plan)
