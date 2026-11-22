@@ -113,8 +113,8 @@ class AgentApprovalStatus(StrEnum):
 class AgentRiskLevel(StrEnum):
     R0 = "R0"
     R1 = "R1"
-    R2 = "R2"
-    R3 = "R3"
+    R2 = "R2"   # 高风险等级
+    R3 = "R3"   # 高风险等级
 
 
 class AgentMemoryStatus(StrEnum):

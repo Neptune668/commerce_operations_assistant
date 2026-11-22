@@ -59,5 +59,5 @@ def _test_text_model() -> dict:
     except LLMResponseError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     if result.get('ok') is not True:
-        raise HTTPException(status_code=502, detail='Text model test response must contain ok=true.')
+        raise HTTPException(status_code=502, detail='Text model tests response must contain ok=true.')
     return {'target': 'text', 'ok': True, 'message': 'Text model is reachable and returned ok=true.'}
