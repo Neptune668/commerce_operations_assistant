@@ -1185,7 +1185,7 @@ class AgentTaskRead(BaseModel):
 
 
 class AgentApprovalDecisionCreate(BaseModel):
-    decision: Literal["approve", "reject"]
+    decision: Literal["approve", "reject","edit_and_approve"]
     note: str | None = Field(default=None, max_length=1000)
     decision_payload: dict[str, Any] = Field(default_factory=dict)
 

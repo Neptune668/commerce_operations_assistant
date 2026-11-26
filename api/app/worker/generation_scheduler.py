@@ -59,3 +59,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+# uv run python -m app.worker.generation_scheduler

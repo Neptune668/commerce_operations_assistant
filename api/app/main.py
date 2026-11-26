@@ -3,7 +3,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from app.api.routes import auth, health, products, promotion_links, stores, users, workspace, model_settings
+from app.api.routes import auth, health, products, promotion_links, stores, users, workspace, model_settings, \
+    agent_runs, agent_platform
 from app.core.config import API_DIR, get_settings
 
 settings = get_settings()
@@ -17,7 +18,7 @@ app.add_middleware(
 )
 
 app.include_router(health.router)
-for route in [auth, products, promotion_links, stores, users, workspace,model_settings]:
+for route in [auth, products, promotion_links, stores, users, workspace,model_settings,agent_runs, agent_platform]:
     app.include_router(route.router, prefix="/api/v1")
 
 uploads_dir = API_DIR / "uploads"
