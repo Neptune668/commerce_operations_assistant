@@ -1,15 +1,17 @@
 from celery import Celery
 
 from app.core.config import get_settings
+from app.observability import configure_observability
 
 
 settings = get_settings()
+configure_observability()
 
 celery_app = Celery(
     "ecommerce_operation",
     broker=settings.redis_url,
     backend=settings.redis_url,
-    include=["app.worker.tasks"]
+    include=["app.worker.tasks"],
 )
 
 celery_app.conf.update(
@@ -44,5 +46,3 @@ celery_app.conf.update(
         },
     },
 )
-
-# uv run celery -A app.worker.celery_app:celery_app worker --loglevel=info --pool=solo -Q generation,agent,agent.workflow,maintenance

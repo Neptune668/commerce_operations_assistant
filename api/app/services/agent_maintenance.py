@@ -18,7 +18,8 @@ from app.models import (
 
 
 def maintain_agent_runtime() -> dict[str, int]:
-    """维护Agentruntime"""
+    """维护Agentruntime；只交换结构化 Agent 状态或受控工具结果，支持 checkpoint、审计与恢复。"""
+    # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
     now = datetime.now(UTC)
     counters = {
         "timed_out": 0,

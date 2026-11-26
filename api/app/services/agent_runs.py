@@ -59,26 +59,27 @@ from app.services.agent_leases import (
     require_active_lease,
 )
 
-# 定义AgentRun的非终态的集合
+
 ACTIVE_AGENT_RUN_STATUSES = {
     AgentRunStatus.QUEUED,
     AgentRunStatus.RUNNING,
     AgentRunStatus.AWAITING_REVIEW,
     AgentRunStatus.RESUME_QUEUED,
 }
-
 CheckpointerFactory = Callable[[], AbstractContextManager[Any]]
 
 
 class AgentRunConflictError(RuntimeError):
     pass
 
+
 class AgentRunStateError(RuntimeError):
     pass
 
-# 创建Agent任务：在同一个事物中创建AgentTask（status=queued）、AgentRun（status=queued）、AgentRunEvent、OutboxEvent（status=pending）
+
 def create_agent_run_record(db: Session, *, product: Product, requested_by: User) -> AgentRun:
-    # 1.根据商品ID查询是否有与当前商品关联的非状态的AgentRun
+    """创建Agent执行记录；只交换结构化 Agent 状态或受控工具结果，支持 checkpoint、审计与恢复。"""
+    # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
     active_run = db.scalar(
         select(AgentRun)
         .where(
@@ -88,15 +89,12 @@ def create_agent_run_record(db: Session, *, product: Product, requested_by: User
         .order_by(AgentRun.id.desc())
         .with_for_update()
     )
-    # 如果有与当前商品关联的非终态的AgentRun，则抛出冲突错误
     if active_run is not None:
         raise AgentRunConflictError(f"Product already has active agent run {active_run.id}")
 
-    # 2.查询当前商品关联的workspace
     settings = get_settings()
     task = None
     workspace = db.get(Workspace, product.workspace_id) if product.workspace_id is not None else None
-    # 如果workspace支持"product_diagnosis_optimization"工作流，则创建AgentTask
     if workspace is not None and is_workflow_enabled(
         workspace.settings,
         "product_diagnosis_optimization",
@@ -118,7 +116,6 @@ def create_agent_run_record(db: Session, *, product: Product, requested_by: User
         )
         db.add(task)
         db.flush()
-    # 创建AgentRun
     run = AgentRun(
         thread_id=str(uuid4()),
         workspace_id=product.workspace_id,
@@ -143,7 +140,6 @@ def create_agent_run_record(db: Session, *, product: Product, requested_by: User
     )
     db.add(run)
     db.flush()
-    # 添加AgentRunEvent事件记录
     db.add(
         AgentRunEvent(
             run_id=run.id,
@@ -154,7 +150,6 @@ def create_agent_run_record(db: Session, *, product: Product, requested_by: User
         )
     )
     if task is not None:
-        # 如果AgentTask不为空则创建发件箱事件
         db.add(
             OutboxEvent(
                 workspace_id=product.workspace_id,
@@ -170,7 +165,7 @@ def create_agent_run_record(db: Session, *, product: Product, requested_by: User
         )
     return run
 
-# 调度Agent运行： AgentRun有可能没有关联AgentTask
+
 def dispatch_agent_run(run_id: int, resume_payload: dict[str, Any] | None = None) -> None:
     """调度Agent执行；只交换结构化 Agent 状态或受控工具结果，支持 checkpoint、审计与恢复。"""
     # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
@@ -192,32 +187,118 @@ def dispatch_agent_run(run_id: int, resume_payload: dict[str, Any] | None = None
                 db.add(event)
                 db.commit()
             from app.services.outbox import kick_outbox_dispatcher
+
             try:
                 kick_outbox_dispatcher()
             except Exception:
                 # Outbox 已持久化，瞬时 Redis 故障不能把可恢复运行误标记为失败。
                 pass
             return
-
-    # 如果AgentRun没有关联的AgentTask，则走直投流程
-    # run_agent_workflow_task 就是用于执行基础流程图 Celery Worker
     from app.worker.tasks import run_agent_workflow_task
+
     settings = get_settings()
     run_agent_workflow_task.apply_async(
         args=[run_id, resume_payload],
         queue=settings.celery_agent_queue,
     )
 
-# 执行Agent工作流（基础工作流图）
+
+def submit_agent_review(
+    db: Session,
+    *,
+    run: AgentRun,
+    reviewer: User,
+    payload: ReviewResumePayload,
+) -> AgentRunReview:
+    """提交Agent审核；只交换结构化 Agent 状态或受控工具结果，支持 checkpoint、审计与恢复。"""
+    # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
+    run = db.scalar(
+        select(AgentRun)
+        .where(AgentRun.id == run.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if run is None:
+        raise AgentRunStateError("Agent run does not exist")
+    if run.status != AgentRunStatus.AWAITING_REVIEW:
+        raise AgentRunStateError("Agent run is not awaiting review")
+    if run.cancel_requested_at is not None:
+        raise AgentRunStateError("Agent run cancellation was requested")
+    existing_review = db.scalar(select(AgentRunReview.id).where(AgentRunReview.run_id == run.id))
+    if existing_review is not None:
+        raise AgentRunStateError("Agent run already has a review decision")
+
+    review = AgentRunReview(
+        run_id=run.id,
+        reviewed_by_user_id=reviewer.id,
+        decision=AgentReviewDecision(payload.decision),
+        edited_output=(
+            payload.edited_output.model_dump(mode="json")
+            if payload.edited_output is not None
+            else {}
+        ),
+        note=payload.note,
+    )
+    run.status = AgentRunStatus.RESUME_QUEUED
+    run.current_agent = HUMAN_REVIEW_GATE
+    if run.task_id is not None:
+        task = db.get(AgentTask, run.task_id)
+        if task is not None:
+            task.status = AgentTaskStatus.QUEUED
+        approval = db.scalar(
+            select(AgentApproval)
+            .where(
+                AgentApproval.run_id == run.id,
+                AgentApproval.action_key == "workflow.accept_result",
+            )
+            .with_for_update()
+        )
+        if approval is not None and approval.status == AgentApprovalStatus.PENDING:
+            now = datetime.now(UTC)
+            if approval.expires_at is not None and _is_due(approval.expires_at, now):
+                raise AgentRunStateError("Agent approval has expired")
+            approval.status = (
+                AgentApprovalStatus.REJECTED
+                if payload.decision == "reject"
+                else AgentApprovalStatus.APPROVED
+            )
+            approval.decided_by_user_id = reviewer.id
+            approval.decision_payload = payload.model_dump(mode="json")
+            approval.note = payload.note
+            approval.decided_at = datetime.now(UTC)
+    db.add(review)
+    db.add(
+        AgentRunEvent(
+            run_id=run.id,
+            event_type="resume_queued",
+            agent_name=HUMAN_REVIEW_GATE,
+            operation_name="interrupt.resume",
+            status=AgentRunStatus.RESUME_QUEUED.value,
+            message="人工审核决定已提交，等待 Celery 恢复工作流。",
+            input_snapshot=redact_snapshot(payload.model_dump(mode="json")),
+        )
+    )
+    db.flush()
+    return review
+
+
+def _is_due(value: datetime, now: datetime) -> bool:
+    """判断到期；只交换结构化 Agent 状态或受控工具结果，支持 checkpoint、审计与恢复。"""
+    if value.tzinfo is None:
+        return value <= now.replace(tzinfo=None)
+    return value <= now
+
+
 def run_agent_workflow(
     run_id: int,
     resume_payload: dict[str, Any] | None = None,
     *,
     checkpointer_factory: CheckpointerFactory = open_postgres_checkpointer,
     workflow_dependencies: AgentWorkflowDependencies | None = None,
-    lease_owner: str | None = None,    # "celery:t000001"
+    lease_owner: str | None = None,
 ) -> None:
-    # 1.AgentRun认领 （认领成功： status=“running”  lease_owner=lease_owner, lease_expires_at=5 minutes from now）
+    """执行Agent工作流；只交换结构化 Agent 状态或受控工具结果，支持 checkpoint、审计与恢复。"""
+    # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
     lease_owner = lease_owner or create_lease_owner("product-workflow", run_id)
     run_snapshot = _claim_agent_run(
         run_id,
@@ -226,9 +307,8 @@ def run_agent_workflow(
     )
     if run_snapshot is None:
         return
-    # 2.执行基础图
-    # deps参数，为状态图节点的执行注入一组函数
-    deps = workflow_dependencies or AgentWorkflowDependencies(
+
+    dependencies = workflow_dependencies or AgentWorkflowDependencies(
         load_product_context=_load_product_context,
         completion_client=default_completion_client,
         record_event=lambda target_run_id, event: _record_harness_event(
@@ -243,15 +323,13 @@ def run_agent_workflow(
             lease_owner=lease_owner,
         ),
     )
-    # config参数 ： thread_id支持中断和恢复
     config = {
         "configurable": {"thread_id": run_snapshot["thread_id"]},
         "recursion_limit": 24,
     }
     with agent_lease_heartbeat(run_id, lease_owner), checkpointer_factory() as checkpointer:
-        graph = build_product_operation_graph(checkpointer=checkpointer, deps=deps)
+        graph = build_product_operation_graph(checkpointer=checkpointer, deps=dependencies)
         if resume_payload is None:
-            # 如果resume_payload为None，表示这个状态图是从头执行
             graph.invoke(
                 {
                     "run_id": run_id,
@@ -264,17 +342,15 @@ def run_agent_workflow(
                 config=config,
             )
         else:
-            # 如果resume_payload不为None，表示这个状态图是中断后恢复
             graph.invoke(Command(resume=resume_payload), config=config)
-        # 获取图的执行结果
         graph_state = graph.get_state(config)
-        # 处理结果
         _sync_agent_run_state(
             run_id,
             graph_state.values,
             interrupted=bool(graph_state.next),
             lease_owner=lease_owner,
         )
+
 
 def mark_agent_run_task_error(
     run_id: int,
@@ -358,103 +434,19 @@ def mark_agent_run_dispatch_failed(run_id: int, error: Exception) -> None:
         db.commit()
 
 
-
-def submit_agent_review(
-    db: Session,
-    *,
-    run: AgentRun,
-    reviewer: User,
-    payload: ReviewResumePayload,
-) -> AgentRunReview:
-    """提交Agent审核；只交换结构化 Agent 状态或受控工具结果，支持 checkpoint、审计与恢复。"""
-    # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
-    run = db.scalar(
-        select(AgentRun)
-        .where(AgentRun.id == run.id)
-        .with_for_update()
-        .execution_options(populate_existing=True)
-    )
-    if run is None:
-        raise AgentRunStateError("Agent run does not exist")
-    if run.status != AgentRunStatus.AWAITING_REVIEW:
-        raise AgentRunStateError("Agent run is not awaiting review")
-    if run.cancel_requested_at is not None:
-        raise AgentRunStateError("Agent run cancellation was requested")
-    existing_review = db.scalar(select(AgentRunReview.id).where(AgentRunReview.run_id == run.id))
-    if existing_review is not None:
-        raise AgentRunStateError("Agent run already has a review decision")
-
-    review = AgentRunReview(
-        run_id=run.id,
-        reviewed_by_user_id=reviewer.id,
-        decision=AgentReviewDecision(payload.decision),
-        edited_output=(
-            payload.edited_output.model_dump(mode="json")
-            if payload.edited_output is not None
-            else {}
-        ),
-        note=payload.note,
-    )
-    run.status = AgentRunStatus.RESUME_QUEUED
-    run.current_agent = HUMAN_REVIEW_GATE
-    if run.task_id is not None:
-        task = db.get(AgentTask, run.task_id)
-        if task is not None:
-            task.status = AgentTaskStatus.QUEUED
-        approval = db.scalar(
-            select(AgentApproval)
-            .where(
-                AgentApproval.run_id == run.id,
-                AgentApproval.action_key == "workflow.accept_result",
-            )
-            .with_for_update()
-        )
-        if approval is not None and approval.status == AgentApprovalStatus.PENDING:
-            now = datetime.now(UTC)
-            if approval.expires_at is not None and _is_due(approval.expires_at, now):
-                raise AgentRunStateError("Agent approval has expired")
-            approval.status = (AgentApprovalStatus.REJECTED if payload.decision == "reject"else AgentApprovalStatus.APPROVED)
-            approval.decided_by_user_id = reviewer.id
-            approval.decision_payload = payload.model_dump(mode="json")
-            approval.note = payload.note
-            approval.decided_at = datetime.now(UTC)
-    db.add(review)
-    db.add(
-        AgentRunEvent(
-            run_id=run.id,
-            event_type="resume_queued",
-            agent_name=HUMAN_REVIEW_GATE,
-            operation_name="interrupt.resume",
-            status=AgentRunStatus.RESUME_QUEUED.value,
-            message="人工审核决定已提交，等待 Celery 恢复工作流。",
-            input_snapshot=redact_snapshot(payload.model_dump(mode="json")),
-        )
-    )
-    db.flush()
-    return review
-
-
-def _is_due(value: datetime, now: datetime) -> bool:
-    """判断到期；只交换结构化 Agent 状态或受控工具结果，支持 checkpoint、审计与恢复。"""
-    if value.tzinfo is None:
-        return value <= now.replace(tzinfo=None)
-    return value <= now
-
-
-
-
-
 def _claim_agent_run(
     run_id: int,
     *,
     is_resume: bool,
-    lease_owner: str,   # "celery:t000001"
+    lease_owner: str,
 ) -> dict[str, Any] | None:
-
-    # 如果中断后恢复 ：RESUME_QUEUED
-    # 如果首次执行： QUEUED
-    allowed_statuses = ({AgentRunStatus.RESUME_QUEUED}if is_resume else {AgentRunStatus.QUEUED})
-
+    """认领Agent执行；只交换结构化 Agent 状态或受控工具结果，支持 checkpoint、审计与恢复。"""
+    # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
+    allowed_statuses = (
+        {AgentRunStatus.RESUME_QUEUED}
+        if is_resume
+        else {AgentRunStatus.QUEUED}
+    )
     with SessionLocal() as db:
         run = db.scalar(select(AgentRun).where(AgentRun.id == run_id).with_for_update())
         if (
@@ -463,17 +455,14 @@ def _claim_agent_run(
             or run.cancel_requested_at is not None
         ):
             return None
-        # 执行签约
         run.status = AgentRunStatus.RUNNING
         run.error = None
         run.started_at = run.started_at or datetime.now(UTC)
         run.lease_owner = lease_owner
         run.lease_expires_at = datetime.now(UTC) + timedelta(minutes=5)
-
         if run.task_id is not None:
             task = db.get(AgentTask, run.task_id)
             if task is not None:
-                # 如果当前任务的请求者没有活跃的访问权限，则取消任务
                 if not _task_requester_has_active_access(db, task):
                     now = datetime.now(UTC)
                     run.status = AgentRunStatus.CANCELLED
@@ -486,7 +475,6 @@ def _claim_agent_run(
                     task.finished_at = now
                     db.commit()
                     return None
-                # 更新任务状态为运行中
                 task.status = AgentTaskStatus.RUNNING
                 task.error = None
         db.add(
@@ -507,21 +495,6 @@ def _claim_agent_run(
         }
         db.commit()
         return snapshot
-
-def _task_requester_has_active_access(db: Session, task: AgentTask) -> bool:
-    membership_id = db.scalar(
-        select(WorkspaceMembership.id)
-        .join(Workspace, Workspace.id == WorkspaceMembership.workspace_id)
-        .join(User, User.id == WorkspaceMembership.user_id)
-        .where(
-            WorkspaceMembership.workspace_id == task.workspace_id,
-            WorkspaceMembership.user_id == task.requested_by_user_id,
-            WorkspaceMembership.status == MembershipStatus.ACTIVE,
-            Workspace.status == WorkspaceStatus.ACTIVE,
-            User.status == UserStatus.ACTIVE,
-        )
-    )
-    return membership_id is not None
 
 
 def _load_product_context(product_id: int) -> ProductContext:
@@ -560,12 +533,15 @@ def _load_product_context(product_id: int) -> ProductContext:
             ],
         )
 
+
 def _record_harness_event(
     run_id: int,
     event: HarnessEvent,
     *,
     lease_owner: str | None = None,
 ) -> None:
+    """记录harness事件；只交换结构化 Agent 状态或受控工具结果，支持 checkpoint、审计与恢复。"""
+    # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
     with SessionLocal() as db:
         run = require_active_lease(db, run_id=run_id, lease_owner=lease_owner, for_update=True)
         renew_active_lease(db, run=run)
@@ -588,6 +564,114 @@ def _record_harness_event(
         )
         db.commit()
 
+
+def _sync_agent_run_state(
+    run_id: int,
+    values: dict[str, Any],
+    *,
+    interrupted: bool,
+    lease_owner: str | None = None,
+) -> None:
+    """同步Agent执行状态；只交换结构化 Agent 状态或受控工具结果，支持 checkpoint、审计与恢复。"""
+    # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
+    with SessionLocal() as db:
+        run = db.scalar(select(AgentRun).where(AgentRun.id == run_id).with_for_update())
+        if run is None:
+            raise AgentRunStateError("Agent run not found while syncing state")
+        if interrupted:
+            run = require_active_lease(
+                db,
+                run_id=run_id,
+                lease_owner=lease_owner,
+                for_update=True,
+            )
+            run.status = AgentRunStatus.AWAITING_REVIEW
+            run.lease_owner = None
+            run.lease_expires_at = None
+            run.current_agent = HUMAN_REVIEW_GATE
+            if run.task_id is not None and run.workspace_id is not None:
+                task = db.get(AgentTask, run.task_id)
+                if task is not None:
+                    task.status = AgentTaskStatus.AWAITING_APPROVAL
+                approval = db.scalar(
+                    select(AgentApproval).where(
+                        AgentApproval.run_id == run.id,
+                        AgentApproval.action_key == "workflow.accept_result",
+                    )
+                )
+                if approval is None:
+                    db.add(
+                        AgentApproval(
+                            workspace_id=run.workspace_id,
+                            task_id=run.task_id,
+                            run_id=run.id,
+                            requested_by_user_id=run.requested_by_user_id,
+                            action_key="workflow.accept_result",
+                            risk_level=AgentRiskLevel.R2,
+                            status=AgentApprovalStatus.PENDING,
+                            request_payload={
+                                "draft_output": run.draft_output,
+                                "quality_report": run.quality_report,
+                            },
+                            decision_payload={},
+                            expires_at=datetime.now(UTC) + timedelta(hours=24),
+                        )
+                    )
+            db.add(
+                AgentRunEvent(
+                    run_id=run.id,
+                    event_type="human_review_requested",
+                    agent_name=HUMAN_REVIEW_GATE,
+                    operation_name="interrupt.wait",
+                    status=AgentRunStatus.AWAITING_REVIEW.value,
+                    message="草稿已生成，等待人工确认、编辑或驳回。",
+                    output_snapshot={
+                        "quality_report": run.quality_report,
+                        "revision_count": run.revision_count,
+                    },
+                )
+            )
+        elif values.get("final_status") == "rejected":
+            if run.status != AgentRunStatus.REJECTED:
+                raise AgentLeaseLostError("Workflow rejection was not committed by fenced finalize")
+            run.current_agent = None
+            if run.task_id is not None:
+                task = db.get(AgentTask, run.task_id)
+                if task is not None:
+                    task.status = AgentTaskStatus.CANCELLED
+                    task.finished_at = run.finished_at
+        elif values.get("final_status") == "completed":
+            if run.status != AgentRunStatus.COMPLETED:
+                raise AgentLeaseLostError("Workflow completion was not committed by fenced finalize")
+            run.current_agent = None
+            run.final_output = redact_snapshot(values.get("final_output", run.final_output))
+            if run.task_id is not None:
+                task = db.get(AgentTask, run.task_id)
+                if task is not None:
+                    task.status = AgentTaskStatus.COMPLETED
+                    task.result_summary = run.final_output
+                    task.finished_at = run.finished_at
+        else:
+            require_active_lease(
+                db,
+                run_id=run_id,
+                lease_owner=lease_owner,
+                for_update=True,
+            )
+        run.revision_count = values.get("revision_count", run.revision_count)
+        run.usage = redact_snapshot(values.get("usage", {}))
+        run.context_snapshot = redact_snapshot(values.get("context", {}))
+        if values.get("diagnosis") and values.get("creative_plans"):
+            run.draft_output = redact_snapshot(
+                {
+                    "diagnosis": values["diagnosis"],
+                    "creative_plans": values["creative_plans"],
+                }
+            )
+        run.quality_report = redact_snapshot(values.get("quality_report", {}))
+        db.commit()
+
+
 def _finalize_agent_run(
     run_id: int,
     review: ReviewResumePayload,
@@ -596,6 +680,7 @@ def _finalize_agent_run(
     lease_owner: str | None = None,
 ) -> dict[str, Any]:
     """完成落库Agent执行；只交换结构化 Agent 状态或受控工具结果，支持 checkpoint、审计与恢复。"""
+    # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
     operation_key = "finalize-v1"
     with SessionLocal() as db:
         run = db.scalar(select(AgentRun).where(AgentRun.id == run_id).with_for_update())
@@ -716,117 +801,3 @@ def _task_requester_has_active_access(db: Session, task: AgentTask) -> bool:
         )
     )
     return membership_id is not None
-
-def _sync_agent_run_state(
-    run_id: int,
-    values: dict[str, Any],
-    *,
-    interrupted: bool,
-    lease_owner: str | None = None,
-) -> None:
-    """同步Agent执行状态"""
-    with SessionLocal() as db:
-        run = db.scalar(select(AgentRun).where(AgentRun.id == run_id).with_for_update())
-        if run is None:
-            raise AgentRunStateError("Agent run not found while syncing state")
-
-
-
-        if interrupted:
-            run = require_active_lease(
-                db,
-                run_id=run_id,
-                lease_owner=lease_owner,
-                for_update=True,
-            )
-            run.status = AgentRunStatus.AWAITING_REVIEW
-            run.lease_owner = None
-            run.lease_expires_at = None
-            run.current_agent = HUMAN_REVIEW_GATE
-            if run.task_id is not None and run.workspace_id is not None:
-                task = db.get(AgentTask, run.task_id)
-                if task is not None:
-                    task.status = AgentTaskStatus.AWAITING_APPROVAL
-                approval = db.scalar(
-                    select(AgentApproval).where(
-                        AgentApproval.run_id == run.id,
-                        AgentApproval.action_key == "workflow.accept_result",
-                    )
-                )
-                if approval is None:
-                    #  从state的values中获取执行的草稿和质量报告
-                    draft_payload = {
-                        "diagnosis": values["diagnosis"],
-                        "creative_plans": values["creative_plans"],
-                    }
-                    quality_report = values["quality_report"]
-                    db.add(
-                        AgentApproval(
-                            workspace_id=run.workspace_id,
-                            task_id=run.task_id,
-                            run_id=run.id,
-                            requested_by_user_id=run.requested_by_user_id,
-                            action_key="workflow.accept_result",
-                            risk_level=AgentRiskLevel.R2,
-                            status=AgentApprovalStatus.PENDING,
-                            request_payload={
-                                "draft_output": draft_payload,
-                                "quality_report":quality_report
-                            },
-                            decision_payload={},
-                            expires_at=datetime.now(UTC) + timedelta(hours=24),
-                        )
-                    )
-            db.add(
-                AgentRunEvent(
-                    run_id=run.id,
-                    event_type="human_review_requested",
-                    agent_name=HUMAN_REVIEW_GATE,
-                    operation_name="interrupt.wait",
-                    status=AgentRunStatus.AWAITING_REVIEW.value,
-                    message="草稿已生成，等待人工确认、编辑或驳回。",
-                    output_snapshot={
-                        "quality_report": run.quality_report,
-                        "revision_count": run.revision_count,
-                    },
-                )
-            )
-        elif values.get("final_status") == "rejected":
-            if run.status != AgentRunStatus.REJECTED:
-                raise AgentLeaseLostError("Workflow rejection was not committed by fenced finalize")
-            run.current_agent = None
-            if run.task_id is not None:
-                task = db.get(AgentTask, run.task_id)
-                if task is not None:
-                    task.status = AgentTaskStatus.CANCELLED
-                    task.finished_at = run.finished_at
-        elif values.get("final_status") == "completed":
-            if run.status != AgentRunStatus.COMPLETED:
-                raise AgentLeaseLostError("Workflow completion was not committed by fenced finalize")
-            run.current_agent = None
-            run.final_output = redact_snapshot(values.get("final_output", run.final_output))
-            if run.task_id is not None:
-                task = db.get(AgentTask, run.task_id)
-                if task is not None:
-                    task.status = AgentTaskStatus.COMPLETED
-                    task.result_summary = run.final_output
-                    task.finished_at = run.finished_at
-        else:
-            require_active_lease(
-                db,
-                run_id=run_id,
-                lease_owner=lease_owner,
-                for_update=True,
-            )
-        run.revision_count = values.get("revision_count", run.revision_count)
-        run.usage = redact_snapshot(values.get("usage", {}))
-        run.context_snapshot = redact_snapshot(values.get("context", {}))
-        if values.get("diagnosis") and values.get("creative_plans"):
-            run.draft_output = redact_snapshot(
-                {
-                    "diagnosis": values["diagnosis"],
-                    "creative_plans": values["creative_plans"],
-                }
-            )
-        run.quality_report = redact_snapshot(values.get("quality_report", {}))
-        db.commit()

@@ -11,9 +11,7 @@ from app.services.image_generation import generate_main_image_asset
 from app.services.video_generation import generate_video_asset
 
 
-# 默认最大尝试次数，包含第一次执行
 DEFAULT_MAX_ATTEMPTS = 3
-# 默认运行超时阈值，超过后由调度器回收
 DEFAULT_RUNNING_TIMEOUT_MINUTES = 30
 
 
@@ -24,7 +22,9 @@ def enqueue_generation_job(
     kind: GenerationJobKind,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
 ) -> GenerationJob:
-    """创建生成任务记录，并写入第一条 queued 事件。"""
+    # 生成图片/视频可能耗时较长，API 只负责落任务记录，实际执行交给后台队列并保留可追踪状态。
+    """enqueue生成任务任务；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     job = GenerationJob(
         product_id=product_id,
         creative_plan_id=creative_plan_id,
@@ -46,8 +46,9 @@ def enqueue_generation_job(
 
 
 def retry_generation_job_record(job: GenerationJob) -> None:
-    """清理上一次执行的痕迹，让同一个任务 ID 重新回到待执行状态。"""
-    # 保留任务 ID 与历史事件，页面与审计都能串起完整的生命周期。
+    # 重试时清空上一次执行痕迹，但保留同一任务 ID，前端和审计日志可以串起完整生命周期。
+    """重试生成任务任务记录；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     job.status = GenerationJobStatus.PENDING
     job.result = {}
     job.error = None
@@ -65,8 +66,9 @@ def retry_generation_job_record(job: GenerationJob) -> None:
 
 
 def cancel_generation_job_record(job: GenerationJob, *, reason: str | None = None) -> bool:
-    """取消尚未结束的任务，返回是否取消成功。"""
-    # 已成功或已失败的记录是历史事实，不做状态回滚。
+    # 只允许取消尚未结束的任务；已成功或失败的记录是历史事实，不在这里做状态回滚。
+    """取消生成任务任务记录；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     if job.status not in {GenerationJobStatus.PENDING, GenerationJobStatus.RUNNING}:
         return False
     job.status = GenerationJobStatus.CANCELLED
@@ -90,7 +92,8 @@ def mark_stale_running_generation_jobs(
     timeout_minutes: int = DEFAULT_RUNNING_TIMEOUT_MINUTES,
     now: datetime | None = None,
 ) -> int:
-    """回收运行超时的任务，按重试策略重新排队或直接失败，返回处理条数。"""
+    """标记超时running生成任务jobs；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     current_time = now or datetime.now(UTC)
     deadline = current_time - timedelta(minutes=timeout_minutes)
     jobs = db.scalars(
@@ -101,7 +104,7 @@ def mark_stale_running_generation_jobs(
         )
     ).all()
     for job in jobs:
-        # 超时视为执行链路中断：释放锁并按重试策略处理，避免长期卡在 running。
+        # 超时任务视为 worker 执行链路中断：释放锁并按重试策略重新排队，避免长期卡在 running。
         _mark_failed_or_retry(job, RuntimeError(f"生成任务运行超过 {timeout_minutes} 分钟，已按超时处理。"))
         job.locked_at = None
         job.locked_by = None
@@ -117,27 +120,30 @@ def mark_stale_running_generation_jobs(
 
 
 def dispatch_generation_job(job_id: int, background_tasks: object | None = None) -> None:
-    """按配置选择执行方式：投递到 Celery 队列，或交给后台任务。"""
+    """调度生成任务任务；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     settings = get_settings()
     if settings.task_queue_backend == "celery":
-        # 耗时生成交给独立 Worker，避免阻塞 Web 进程。
+        # 生产环境优先走 Celery，避免长耗时生成阻塞 Web 进程，也便于后续横向扩 worker。
         from app.worker.tasks import run_generation_job_task
+
         run_generation_job_task.delay(job_id)
         return
 
     if background_tasks is not None and hasattr(background_tasks, "add_task"):
-        # 本地与轻量部署使用后台任务，保持部署简单。
+        # 本地和轻量部署可使用 FastAPI background task，保持原型部署简单。
         background_tasks.add_task(run_generation_job, job_id)
         return
-    # 兜底
+
     run_generation_job(job_id)
 
 
 def process_next_generation_job(worker_id: str = "fastapi-background") -> int | None:
-    """取出一条最早可执行的待执行任务并执行，返回任务 ID。"""
+    """处理下次生成任务任务；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     now = datetime.now(UTC)
     with SessionLocal() as db:
-        # 单次只取一条，便于用定时器或单 Worker 轮询时控制并发与重试节奏。
+        # 单次只取最早可执行任务，便于用定时器或单 worker 轮询时控制并发和重试节奏。
         statement = (
             select(GenerationJob)
             .where(
@@ -157,19 +163,12 @@ def process_next_generation_job(worker_id: str = "fastapi-background") -> int | 
 
 
 def run_generation_job(job_id: int, worker_id: str = "fastapi-background") -> None:
-    """执行一次生成任务：加锁、检查状态、调用媒体服务并记录结果。"""
+    """执行生成任务任务；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     with SessionLocal() as db:
-        # 行锁让 API 后台、调度器与 Worker 的重复消息只能有一个真正开始执行。
-        job = db.get(GenerationJob, job_id, with_for_update=True)
-        # 任务可能已被取消、重试或被其他 Worker 抢先处理，非 pending 直接返回。
+        job = db.get(GenerationJob, job_id)
+        # 任务可能被用户取消、重试或其他 worker 抢先处理；非 pending 时直接退出，避免重复生成素材。
         if job is None or job.status != GenerationJobStatus.PENDING:
-            return
-
-        # 部分驱动会返回不带时区的时间，统一按 UTC 解释后再比较。
-        due_at = job.next_run_at
-        if due_at is not None and due_at.tzinfo is None:
-            due_at = due_at.replace(tzinfo=UTC)
-        if due_at is not None and due_at > datetime.now(UTC):
             return
 
         _mark_running(job, worker_id)
@@ -204,7 +203,8 @@ def run_generation_job(job_id: int, worker_id: str = "fastapi-background") -> No
 
 
 def _mark_running(job: GenerationJob, worker_id: str) -> None:
-    """把任务切换到 running，记录本次尝试与执行者。"""
+    """标记running，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     job.status = GenerationJobStatus.RUNNING
     job.attempts += 1
     job.started_at = datetime.now(UTC)
@@ -221,7 +221,8 @@ def _mark_running(job: GenerationJob, worker_id: str) -> None:
 
 
 def _generate_asset(db: Session, job: GenerationJob, creative_plan: CreativePlan) -> dict:
-    """按任务种类调用对应的媒体服务，并把结果写入方案内容与素材记录。"""
+    """生成素材，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     if job.kind == GenerationJobKind.MAIN_IMAGE_ASSET:
         asset = generate_main_image_asset(creative_plan)
         _append_generated_asset(creative_plan, "generated_images", asset)
@@ -236,10 +237,11 @@ def _generate_asset(db: Session, job: GenerationJob, creative_plan: CreativePlan
 
 
 def _mark_failed_or_retry(job: GenerationJob, exc: Exception) -> None:
-    """记录失败原因，未达上限时安排重试，达到上限时置为失败。"""
+    """标记失败or重试，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     job.error = str(exc)[:2000]
     if job.attempts < job.max_attempts:
-        # 供应商偶发超时较常见，采用短退避重试，最长退避 10 分钟。
+        # 外部生成供应商偶发超时较常见，采用短退避重试；超过上限后保留失败状态等待人工处理。
         job.status = GenerationJobStatus.PENDING
         job.next_run_at = datetime.now(UTC) + timedelta(minutes=min(job.attempts * 2, 10))
         record_generation_job_event(
@@ -260,11 +262,12 @@ def _mark_failed_or_retry(job: GenerationJob, exc: Exception) -> None:
 
 
 def _append_generated_asset(creative_plan: CreativePlan, key: str, asset: dict) -> None:
-    """把素材字典追加到方案内容的指定列表中，最新结果排在最前面。"""
+    """追加生成素材，统一主流程中的格式、默认值和异常边界。"""
     content = dict(creative_plan.content or {})
     existing = content.get(key, [])
     if not isinstance(existing, list):
         existing = []
+    # 最新素材放在最前面，详情页展示和运营复核时优先看到最近一次生成结果。
     content[key] = [asset, *existing]
     creative_plan.content = content
 
@@ -277,8 +280,9 @@ def record_generation_job_event(
     payload: dict | None = None,
     worker_id: str | None = None,
 ) -> GenerationJobEvent:
-    """写入一条任务事件，记录当时的状态、说明与结构化细节。"""
-    # 事件只保存安全摘要：不写入供应商密钥，也不保存完整的外部响应。
+    # 事件日志用于排查任务生命周期，只记录状态和安全摘要，不保存模型 API key 或完整外部响应。
+    """记录生成任务任务事件；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     event = GenerationJobEvent(
         event_type=event_type,
         status=job.status,

@@ -12,7 +12,6 @@ from app.services.llm import (
 
 
 class MainImagePlanOutput(BaseModel):
-    """主图方案"""
     title: str = Field(min_length=1)
     angle: str = Field(min_length=1)
     layout: str = Field(min_length=1)
@@ -50,7 +49,8 @@ class VideoScriptPlansOutput(BaseModel):
 
 
 def generate_main_image_plans(product: Product, diagnosis: ProductDiagnosis | None) -> list[dict]:
-    """生成主图方案；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
+    """生成主流程图片plans；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     try:
         return generate_llm_main_image_plans(product, diagnosis)
     except (LLMNotConfiguredError, LLMResponseError, ValidationError) as exc:
@@ -66,7 +66,7 @@ def generate_llm_main_image_plans(
     product: Product,
     diagnosis: ProductDiagnosis | None,
 ) -> list[dict[str, Any]]:
-    """生成llm主图方案；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
+    """生成llm主流程图片plans；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
     # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     parsed, raw_response = create_json_chat_completion(
         _build_main_image_messages(product, diagnosis),
@@ -92,7 +92,7 @@ def _build_main_image_messages(
     product: Product,
     diagnosis: ProductDiagnosis | None,
 ) -> list[dict[str, str]]:
-    """构建主图方案消息，统一主流程中的格式、默认值和异常边界。"""
+    """构建主流程图片消息，统一主流程中的格式、默认值和异常边界。"""
     # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     return [
         {
@@ -139,7 +139,7 @@ def generate_rule_based_main_image_plans(
     product: Product,
     diagnosis: ProductDiagnosis | None,
 ) -> list[dict]:
-    """生成rulebased主图方案；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
+    """生成rulebased主流程图片plans；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
     # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     focus_points = _focus_points(product, diagnosis)
     audience = product.target_audience or "目标用户"
@@ -237,7 +237,7 @@ def _creative_context_payload(product: Product, diagnosis: ProductDiagnosis | No
 
 
 def generate_video_script_plans(product: Product, diagnosis: ProductDiagnosis | None) -> list[dict]:
-    """生成视频脚本方案；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
+    """生成视频scriptplans；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
     # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     try:
         return generate_llm_video_script_plans(product, diagnosis)
@@ -254,7 +254,7 @@ def generate_llm_video_script_plans(
     product: Product,
     diagnosis: ProductDiagnosis | None,
 ) -> list[dict[str, Any]]:
-    """生成llm视频脚本方案；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
+    """生成llm视频scriptplans；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
     # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     parsed, raw_response = create_json_chat_completion(
         _build_video_script_messages(product, diagnosis),
@@ -279,7 +279,7 @@ def _build_video_script_messages(
     product: Product,
     diagnosis: ProductDiagnosis | None,
 ) -> list[dict[str, str]]:
-    """构建视频脚本消息，统一主流程中的格式、默认值和异常边界。"""
+    """构建视频script消息，统一主流程中的格式、默认值和异常边界。"""
     # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     return [
         {
@@ -328,7 +328,7 @@ def generate_rule_based_video_script_plans(
     product: Product,
     diagnosis: ProductDiagnosis | None,
 ) -> list[dict]:
-    """生成rulebased视频脚本方案；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
+    """生成rulebased视频scriptplans；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
     # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     focus_points = _focus_points(product, diagnosis)
     audience = product.target_audience or "目标用户"

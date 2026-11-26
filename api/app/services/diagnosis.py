@@ -11,15 +11,16 @@ from app.services.llm import (
     create_json_chat_completion,
 )
 
+
 class ProductDiagnosisOutput(BaseModel):
-    """商品诊断输出结果"""
-    positioning: str = Field(min_length=1, description="一句话定位建议")
-    price_band: str = Field(min_length=1, description="价格带判断")
-    audience_insights: list[str] = Field(default_factory=list, description="人群洞察")
-    pain_points: list[str] = Field(default_factory=list, description="痛点")
-    selling_point_analysis: list[str] = Field(default_factory=list, description="卖点分析")
-    risks: list[str] = Field(default_factory=list, description="风险")
-    recommendations: list[str] = Field(default_factory=list, description="下一步动作")
+    positioning: str = Field(min_length=1)
+    price_band: str = Field(min_length=1)
+    audience_insights: list[str] = Field(default_factory=list)
+    pain_points: list[str] = Field(default_factory=list)
+    selling_point_analysis: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    recommendations: list[str] = Field(default_factory=list)
+
 
 def generate_product_diagnosis(product: Product) -> dict[str, Any]:
     """生成商品商品诊断；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
@@ -34,12 +35,14 @@ def generate_product_diagnosis(product: Product) -> dict[str, Any]:
 
 def generate_llm_diagnosis(product: Product) -> dict[str, Any]:
     """生成llm商品诊断；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     parsed, raw_response = create_json_chat_completion(
         _build_diagnosis_messages(product),
         max_tokens=2200,
         temperature=0.25,
     )
     diagnosis = ProductDiagnosisOutput.model_validate(parsed)
+
     return {
         "source": "llm",
         **diagnosis.model_dump(),
@@ -50,6 +53,7 @@ def generate_llm_diagnosis(product: Product) -> dict[str, Any]:
             "llm_output": parsed,
         },
     }
+
 
 def _build_diagnosis_messages(product: Product) -> list[dict[str, str]]:
     """构建商品诊断消息，统一主流程中的格式、默认值和异常边界。"""
@@ -85,9 +89,11 @@ def _build_diagnosis_messages(product: Product) -> list[dict[str, str]]:
         },
     ]
 
+
 def _product_payload(product: Product) -> str:
     # 诊断只使用系统内已有商品与竞品资料，不假设平台后台真实成交、评价或库存数据。
     """商品载荷，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     payload = {
         "name": product.name,
         "platform": product.platform,
@@ -116,6 +122,7 @@ def _product_payload(product: Product) -> str:
 def generate_rule_based_diagnosis(product: Product) -> dict:
     # 规则诊断只做启发式判断，重点提示缺口和下一步测试方向，不替代真实经营分析。
     """生成rulebased商品诊断；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     competitor_prices = [
         competitor.price for competitor in product.competitors if competitor.price is not None
     ]
@@ -154,15 +161,20 @@ def generate_rule_based_diagnosis(product: Product) -> dict:
         },
     }
 
+
 def _price_band(product_price: Decimal | None, competitor_prices: list[Decimal]) -> str:
-    """用商品价与竞价样本比较，给出价格带判断或缺样本提示"""
+    """价格band，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     if product_price is None:
         return "商品售价未录入，暂时无法判断价格带。"
+
     if not competitor_prices:
         return f"当前商品售价为 {product_price}，还缺少竞品价格样本。"
+
     min_price = min(competitor_prices)
     max_price = max(competitor_prices)
     avg_price = sum(competitor_prices, Decimal("0")) / Decimal(len(competitor_prices))
+
     if product_price < min_price:
         position = "低于现有竞品样本，适合测试性价比或引流定位"
     elif product_price > max_price:
@@ -171,23 +183,30 @@ def _price_band(product_price: Decimal | None, competitor_prices: list[Decimal])
         position = "处于偏高价格带，需要突出差异化价值"
     else:
         position = "处于中低价格带，可优先测试转化效率"
+
     return f"{position}；竞品样本价格区间为 {min_price}-{max_price}，均价约 {avg_price:.2f}。"
+
 
 def _positioning(
     product: Product,
     differentiated_points: list[str],
     overlap_points: list[str],
 ) -> str:
-    """按差异化卖点、重合卖点或基础信息三档生成定位表述"""
+    """positioning，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     audience = product.target_audience or "目标人群未明确"
     category = product.category or "当前类目"
+
     if differentiated_points:
         point_text = "、".join(differentiated_points[:3])
         return f"{category}商品可围绕“{point_text}”做差异化表达，优先面向{audience}。"
+
     if overlap_points:
         point_text = "、".join(overlap_points[:3])
         return f"{category}商品目前与竞品共同卖点集中在“{point_text}”，需要补充更具体的使用场景或信任证明。"
+
     return f"{category}商品信息还偏基础，建议先明确核心卖点和目标人群，再做素材测试。"
+
 
 def _audience_insights(product: Product) -> list[str]:
     """根据商品目标人群生成可执行洞察；缺失人群时返回补录建议而不是臆测。"""
@@ -203,8 +222,10 @@ def _audience_insights(product: Product) -> list[str]:
         "建议补充年龄段、使用场景、购买理由和价格敏感度。",
     ]
 
+
 def _pain_points(product: Product, competitor_points: list[str]) -> list[str]:
-    """按卖点关键词匹配可能的痛点，匹配不到则返回提炼建议"""
+    """painpoints，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     points = list(product.selling_points) + competitor_points
     if not points:
         return [
@@ -231,12 +252,14 @@ def _pain_points(product: Product, competitor_points: list[str]) -> list[str]:
         "建议把卖点改写成用户能感知的结果，而不只是商品属性。",
     ]
 
+
 def _selling_point_analysis(
     selling_points: list[str],
     differentiated_points: list[str],
     overlap_points: list[str],
 ) -> list[str]:
-    """卖点分析"""
+    """sellingpointanalysis，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     if not selling_points:
         return ["商品核心卖点缺失，建议先补 3-5 个可被画面证明的卖点。"]
 
@@ -247,12 +270,14 @@ def _selling_point_analysis(
         analysis.append(f"与竞品重合卖点包括：{'、'.join(overlap_points[:5])}，需要更具体的证明方式。")
     return analysis
 
+
 def _risks(
     product: Product,
     competitor_prices: list[Decimal],
     overlap_points: list[str],
 ) -> list[str]:
-    """按竞品数量、价格、人群与重合度给出风险清单"""
+    """risks，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     risks = []
     if len(product.competitors) < 3:
         risks.append("竞品样本少于 3 个，价格带和卖点判断还不够稳定。")
@@ -266,12 +291,14 @@ def _risks(
         risks.append("目标人群缺失，投放和内容测试会缺少方向。")
     return risks or ["暂无明显结构性风险，下一步重点是用素材测试验证判断。"]
 
+
 def _recommendations(
     product: Product,
     competitor_prices: list[Decimal],
     differentiated_points: list[str],
 ) -> list[str]:
-    """给出可执行的下一步动作，始终包含素材测试建议"""
+    """recommendations，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     recommendations = []
     if len(product.competitors) < 3:
         recommendations.append("继续补充至少 3 个竞品，覆盖同价位爆款、低价引流款和高价标杆款。")

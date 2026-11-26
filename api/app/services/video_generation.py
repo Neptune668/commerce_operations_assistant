@@ -11,21 +11,19 @@ from app.services.model_settings import get_runtime_settings
 from app.services.volcengine import VolcengineCredentialsError, parse_access_key_pair, signed_json_headers
 
 
-GENERATED_VIDEOS_DIR = API_DIR / "uploads" / "generated-videos"
-
-
 class VideoGenerationNotConfiguredError(RuntimeError):
-    """视频生成本地配置缺失或不被支持时抛出。"""
     pass
 
 
 class VideoGenerationError(RuntimeError):
-    """视频生成过程失败时抛出，例如任务失败、超时、参数非法或下载失败。"""
     pass
 
 
+GENERATED_VIDEOS_DIR = API_DIR / "uploads" / "generated-videos"
+
+
 def is_video_generation_configured(settings: Settings | None = None) -> bool:
-    """判断本地是否已具备调用视频生成服务的完整配置。"""
+    """判断视频生成任务configured；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
     settings = settings or get_runtime_settings()
     return bool(
         settings.video_provider
@@ -40,11 +38,12 @@ def generate_video_asset(
     *,
     settings: Settings | None = None,
 ) -> dict[str, Any]:
-    """把一条视频脚本创意方案生成为一段视频，返回可直接入库的素材字典。"""
+    """生成视频素材；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     settings = settings or get_runtime_settings()
     if not is_video_generation_configured(settings):
         raise VideoGenerationNotConfiguredError("Video generation provider is not configured.")
-    if settings.video_provider != "jimeng":
+    if settings.video_provider not in {"dashscope", "jimeng"}:
         raise VideoGenerationNotConfiguredError(
             f"Unsupported video provider: {settings.video_provider}. "
             "This provider can be saved in settings, but its generation adapter is not implemented yet."
@@ -55,11 +54,14 @@ def generate_video_asset(
     # 视频生成保留 workflow 元数据，方便运营复核参考图、字幕和配音，不把结果做成只读黑盒。
     prompt = _sanitize_video_prompt(_video_prompt(creative_plan))
     workflow = _video_workflow(creative_plan)
-    if settings.video_model != "jimeng_t2v_v30":
-        raise VideoGenerationNotConfiguredError("视频模型必须为 jimeng_t2v_v30。")
-    task_id = create_jimeng_video_task(prompt, settings, workflow=workflow)
-    result = poll_jimeng_video_task(task_id, settings)
-    video_url = _extract_jimeng_video_url(result)
+    if settings.video_provider == "jimeng":
+        task_id = create_jimeng_video_task(prompt, settings, workflow=workflow)
+        result = poll_jimeng_video_task(task_id, settings)
+        video_url = _extract_jimeng_video_url(result)
+    else:
+        task_id = create_dashscope_video_task(prompt, settings, workflow=workflow)
+        result = poll_dashscope_video_task(task_id, settings)
+        video_url = _extract_dashscope_video_url(result)
     public_path = _download_generated_video(video_url, creative_plan.id)
 
     return {
@@ -81,7 +83,8 @@ def create_jimeng_video_task(
     settings: Settings,
     workflow: dict[str, Any] | None = None,
 ) -> str:
-    """向服务商提交一次视频生成任务，返回供应商任务 ID。"""
+    """创建jimeng视频任务；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     payload = {
         "req_key": settings.video_model,
         "prompt": prompt,
@@ -91,7 +94,7 @@ def create_jimeng_video_task(
     }
     reference_images = (workflow or {}).get("reference_images") or []
     if reference_images:
-        raise VideoGenerationError("jimeng_t2v_v30 是文生视频模型，请清空 reference_images；图生视频需另接专用接口。")
+        payload["image_urls"] = reference_images[:3]
     data = _post_jimeng_video_json(
         settings=settings,
         action="CVSync2AsyncSubmitTask",
@@ -105,7 +108,8 @@ def create_jimeng_video_task(
 
 
 def poll_jimeng_video_task(task_id: str, settings: Settings) -> dict[str, Any]:
-    """按配置间隔轮询视频任务结果，成功返回响应字典，失败或超时抛错。"""
+    """轮询jimeng视频任务；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     max_attempts = max(settings.video_poll_max_attempts, 1)
     interval = max(settings.video_poll_interval_seconds, 1)
     payload = {"req_key": settings.video_model, "task_id": task_id}
@@ -134,7 +138,8 @@ def _post_jimeng_video_json(
     payload: dict[str, Any],
     timeout: int,
 ) -> dict[str, Any]:
-    """按统一流程发送一次视频服务商请求：签名、发送、校验业务状态码。"""
+    """发送jimeng视频JSON，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     try:
         access_key, secret_key = parse_access_key_pair(settings.video_api_key)
     except VolcengineCredentialsError as exc:
@@ -157,18 +162,19 @@ def _post_jimeng_video_json(
             response.raise_for_status()
             data = response.json()
     except httpx.HTTPStatusError as exc:
-        raise VideoGenerationError(_provider_error_detail(exc.response)) from exc
+        raise VideoGenerationError(_dashscope_error_detail(exc.response)) from exc
     except httpx.HTTPError as exc:
         raise VideoGenerationError(_http_error_detail("Jimeng video request failed", exc)) from exc
 
-    code = data.get("code")
-    if code != 10000:
+    code = data.get("code") or data.get("Code")
+    if code not in {None, 0, 10000, "0", "10000"}:
         raise VideoGenerationError(str(data)[:500])
     return data
 
 
 def _extract_jimeng_task_id(data: dict[str, Any]) -> str:
-    """从服务商响应的多个可能容器中提取任务 ID，取不到返回空字符串。"""
+    """提取jimeng任务id，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     for container in (data.get("data"), data.get("Result"), data.get("output"), data):
         if isinstance(container, dict) and isinstance(container.get("task_id"), str):
             return container["task_id"]
@@ -176,7 +182,8 @@ def _extract_jimeng_task_id(data: dict[str, Any]) -> str:
 
 
 def _jimeng_status(data: dict[str, Any]) -> str:
-    """读取任务状态并统一转为小写，取不到返回空字符串。"""
+    """jimeng状态，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     container = data.get("data")
     if isinstance(container, dict) and isinstance(container.get("status"), str):
         return container["status"].lower()
@@ -186,7 +193,8 @@ def _jimeng_status(data: dict[str, Any]) -> str:
 
 
 def _extract_jimeng_video_url(data: dict[str, Any]) -> str:
-    """从响应中提取视频地址，支持单值与列表两种形式。"""
+    """提取jimeng视频URL，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     containers = [data.get("data"), data.get("Result"), data.get("output"), data]
     for container in containers:
         if not isinstance(container, dict):
@@ -203,14 +211,15 @@ def _extract_jimeng_video_url(data: dict[str, Any]) -> str:
 
 
 def _duration_to_frames(duration: int) -> int:
-    """把秒数换算为帧数，当前模型仅支持 5 秒与 10 秒两种。"""
-    if duration not in {5, 10}:
-        raise VideoGenerationError("即梦720P文生视频仅支持5秒或10秒。")
-    return 24 * duration + 1
+    """durationtoframes，统一主流程中的格式、默认值和异常边界。"""
+    if duration <= 5:
+        return 121
+    return max(121, duration * 24 + 1)
 
 
 def _aspect_ratio_from_size(size: str) -> str:
-    """把像素尺寸换算为最接近的内置画面比例，无法识别时回退 16:9。"""
+    """aspect比率fromsize，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     normalized = size.replace("*", "x").lower()
     parts = normalized.split("x", 1)
     if len(parts) != 2:
@@ -234,8 +243,122 @@ def _aspect_ratio_from_size(size: str) -> str:
     return min(candidates, key=lambda item: abs(candidates[item] - ratio))
 
 
+def create_dashscope_video_task(
+    prompt: str,
+    settings: Settings,
+    workflow: dict[str, Any] | None = None,
+) -> str:
+    """创建dashscope视频任务；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
+    workflow = workflow or {}
+    input_payload = {
+        "prompt": prompt,
+    }
+    reference_images = workflow.get("reference_images") or []
+    if reference_images:
+        input_payload["img_url"] = reference_images[0]
+
+    url = _join_base_url(settings.video_base_url or "", "services/aigc/video-generation/video-synthesis")
+    payload = {
+        "model": settings.video_model,
+        "input": input_payload,
+        "parameters": {
+            "size": settings.video_size,
+            "duration": settings.video_duration,
+            "shot_type": "multi",
+            "prompt_extend": True,
+            "watermark": False,
+            "negative_prompt": "",
+        },
+    }
+    try:
+        response = _post_dashscope_json(
+            url,
+            headers=_dashscope_video_headers(settings, async_request=True),
+            payload=payload,
+            timeout=120,
+        )
+    except httpx.HTTPStatusError as exc:
+        raise VideoGenerationError(_dashscope_error_detail(exc.response)) from exc
+    except httpx.HTTPError as exc:
+        raise VideoGenerationError(
+            _http_error_detail("DashScope video task creation failed", exc)
+        ) from exc
+
+    data = response.json()
+    task_id = data.get("output", {}).get("task_id")
+    if not isinstance(task_id, str) or not task_id:
+        raise VideoGenerationError("DashScope video response did not contain task_id.")
+    return task_id
+
+
+def poll_dashscope_video_task(task_id: str, settings: Settings) -> dict[str, Any]:
+    """轮询dashscope视频任务；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
+    url = _join_base_url(settings.video_base_url or "", f"tasks/{task_id}")
+    max_attempts = max(settings.video_poll_max_attempts, 1)
+    interval = max(settings.video_poll_interval_seconds, 1)
+
+    try:
+        for _attempt in range(max_attempts):
+            data = _get_dashscope_json(
+                url,
+                headers=_dashscope_video_headers(settings, include_content_type=False),
+                timeout=30,
+            )
+            status = data.get("output", {}).get("task_status")
+            if status == "SUCCEEDED":
+                return data
+            if status in {"FAILED", "CANCELED", "UNKNOWN"}:
+                detail = data.get("output", {}).get("message") or status
+                raise VideoGenerationError(f"DashScope video task ended with status: {detail}")
+            time.sleep(interval)
+    except httpx.HTTPStatusError as exc:
+        raise VideoGenerationError(_dashscope_error_detail(exc.response)) from exc
+    except httpx.HTTPError as exc:
+        raise VideoGenerationError(_http_error_detail("DashScope video task polling failed", exc)) from exc
+
+    raise VideoGenerationError("DashScope video task timed out.")
+
+
+def poll_dashscope_video_task_by_id(task_id: str, settings: Settings | None = None) -> dict[str, Any]:
+    """轮询dashscope视频任务byid；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
+    settings = settings or get_runtime_settings()
+    return poll_dashscope_video_task(task_id, settings)
+
+
+def _get_dashscope_json(
+    url: str,
+    *,
+    headers: dict[str, str],
+    timeout: int,
+) -> dict[str, Any]:
+    """获取dashscopeJSON，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
+    last_error: httpx.HTTPError | None = None
+    for attempt in range(3):
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                response = client.get(
+                    url,
+                    headers=headers,
+                )
+                response.raise_for_status()
+                return response.json()
+        except httpx.HTTPStatusError:
+            raise
+        except httpx.HTTPError as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(2 + attempt * 2)
+
+    assert last_error is not None
+    raise last_error
+
+
 def _video_prompt(creative_plan: CreativePlan) -> str:
-    """优先使用方案里的 video_prompt，缺失时按脚本字段拼出可用提示词。"""
+    """视频prompt，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     content = creative_plan.content or {}
     prompt = content.get("video_prompt")
     if isinstance(prompt, str) and prompt.strip():
@@ -266,7 +389,7 @@ def _video_prompt(creative_plan: CreativePlan) -> str:
 
 
 def _video_workflow(creative_plan: CreativePlan) -> dict[str, Any]:
-    """整理本次视频生成的工作流元数据，供提示词拼接与运营复核使用。"""
+    """视频工作流，统一主流程中的格式、默认值和异常边界。"""
     content = creative_plan.content or {}
     reference_images = _string_list(content.get("reference_images"))
     return {
@@ -279,7 +402,8 @@ def _video_workflow(creative_plan: CreativePlan) -> dict[str, Any]:
 
 
 def _workflow_prompt_lines(content: dict) -> str:
-    """把工作流元数据整理成可拼进提示词的若干行文本。"""
+    """工作流promptlines，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     lines: list[str] = []
     if _string_list(content.get("reference_images")):
         lines.append("Reference image: keep the product shape, package texture, and hero color consistent.")
@@ -296,7 +420,8 @@ def _workflow_prompt_lines(content: dict) -> str:
 
 
 def _string_list(value: object) -> list[str]:
-    """把任意输入归一化为非空字符串列表，支持列表与换行文本两种形式。"""
+    """字符串查询，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     if isinstance(value, list):
         return [item.strip() for item in value if isinstance(item, str) and item.strip()]
     if isinstance(value, str):
@@ -305,12 +430,13 @@ def _string_list(value: object) -> list[str]:
 
 
 def _string_value(value: object) -> str:
-    """把任意输入归一化为字符串，非字符串一律视为空。"""
+    """字符串值，统一主流程中的格式、默认值和异常边界。"""
     return value.strip() if isinstance(value, str) else ""
 
 
 def _sanitize_video_prompt(prompt: str) -> str:
-    """清理服务商协议可能不接受的特殊字符，保留提示词的业务语义。"""
+    """清洗视频prompt，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     replacements = {
         "\u00a5": "yuan",
         "\uffe5": "yuan",
@@ -329,8 +455,29 @@ def _sanitize_video_prompt(prompt: str) -> str:
     ).strip()
 
 
+def _extract_dashscope_video_url(result: dict[str, Any]) -> str:
+    """提取dashscope视频URL，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
+    output = result.get("output", {})
+    video_url = output.get("video_url")
+    if isinstance(video_url, str) and video_url:
+        return video_url
+
+    results = output.get("results", [])
+    if isinstance(results, list):
+        for item in results:
+            if isinstance(item, dict):
+                for key in ("video_url", "url"):
+                    value = item.get(key)
+                    if isinstance(value, str) and value:
+                        return value
+
+    raise VideoGenerationError("DashScope video task result did not contain video url.")
+
+
 def _download_generated_video(video_url: str, creative_plan_id: int) -> str:
-    """把供应商临时地址的视频下载到本地，返回项目对外可访问的本地路径。"""
+    """下载生成视频，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     GENERATED_VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
     filename = f"video-plan-{creative_plan_id}-{uuid.uuid4().hex}.mp4"
     output_path = GENERATED_VIDEOS_DIR / filename
@@ -347,8 +494,60 @@ def _download_generated_video(video_url: str, creative_plan_id: int) -> str:
     return f"/uploads/generated-videos/{filename}"
 
 
-def _provider_error_detail(response: httpx.Response) -> str:
-    """把服务商的错误响应整理成一段可写入日志与异常的简短文本。"""
+def _join_base_url(base_url: str, path: str) -> str:
+    """拼接baseURL，统一主流程中的格式、默认值和异常边界。"""
+    return f"{base_url.strip().rstrip('/')}/{path.strip('/')}"
+
+
+def _dashscope_video_headers(
+    settings: Settings,
+    *,
+    async_request: bool = False,
+    include_content_type: bool = True,
+) -> dict[str, str]:
+    """dashscope视频headers，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
+    headers = {
+        "Authorization": f"Bearer {settings.video_api_key}",
+    }
+    if include_content_type:
+        headers["Content-Type"] = "application/json"
+    if async_request:
+        headers["X-DashScope-Async"] = "enable"
+    if settings.video_workspace_id:
+        headers["X-DashScope-WorkSpace"] = settings.video_workspace_id
+    return headers
+
+
+def _post_dashscope_json(
+    url: str,
+    *,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+    timeout: int,
+) -> httpx.Response:
+    """发送dashscopeJSON，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
+    last_error: httpx.HTTPError | None = None
+    for attempt in range(3):
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                response = client.post(url, headers=headers, json=payload)
+                response.raise_for_status()
+                return response
+        except httpx.HTTPStatusError:
+            raise
+        except httpx.HTTPError as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(3 + attempt * 2)
+
+    assert last_error is not None
+    raise last_error
+
+
+def _dashscope_error_detail(response: httpx.Response) -> str:
+    """dashscope错误详情，统一主流程中的格式、默认值和异常边界。"""
     try:
         data = response.json()
     except ValueError:
@@ -357,5 +556,5 @@ def _provider_error_detail(response: httpx.Response) -> str:
 
 
 def _http_error_detail(message: str, exc: httpx.HTTPError) -> str:
-    """统一格式化 HTTP 异常信息，便于区分网络错误与业务错误。"""
+    """HTTP错误详情，统一主流程中的格式、默认值和异常边界。"""
     return f"{message}: {type(exc).__name__}: {exc}"

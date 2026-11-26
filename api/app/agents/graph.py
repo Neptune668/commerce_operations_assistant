@@ -35,29 +35,31 @@ from app.agents.specialists import (
 )
 
 
-ProductContextLoader = Callable[[int], ProductContext]  # 声明 ProductContextLoader 是一个返回类型为ProductContext可调用的函数
+ProductContextLoader = Callable[[int], ProductContext]
 EventRecorder = Callable[[int, HarnessEvent], None]
 WorkflowFinalizer = Callable[[int, ReviewResumePayload, AgentDraftOutput | None], dict[str, Any]]
 
 
 @dataclass(frozen=True)
 class AgentWorkflowDependencies:
-    load_product_context: ProductContextLoader   # AgentWorkflowDependencies实例 deps.load_product_context()
+    load_product_context: ProductContextLoader
     completion_client: CompletionClient
     record_event: EventRecorder
     finalize_run: WorkflowFinalizer
 
-# 基础工作流图（商品评估与优化）
+
 def build_product_operation_graph(*, checkpointer: Any, deps: AgentWorkflowDependencies):
+    """构建商品操作工作流图，注册节点、条件路由、人审中断和 checkpoint，返回可执行编排图。"""
+    # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
     diagnosis_agent = DiagnosisAgent(deps.completion_client)
     creative_agent = CreativeStrategyAgent(deps.completion_client)
     quality_agent = QualityReviewAgent()
 
-    # 1.商品信息查询节点（product_context_agent）
     def product_context_node(state: AgentWorkflowState) -> dict[str, Any]:
-        # 判断工具权限
+        """执行商品上下文节点，从共享状态读取必要输入，并只返回当前节点负责的增量字段。"""
+        # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
         require_tool_permission(PRODUCT_CONTEXT_AGENT, "product_context.read")
-        # 查询商品信息
+
         def execute() -> dict[str, Any]:
             """执行商品上下文节点的受观测业务步骤，并把结构化增量交回图节点。"""
             context = deps.load_product_context(state["product_id"])
@@ -72,9 +74,9 @@ def build_product_operation_graph(*, checkpointer: Any, deps: AgentWorkflowDepen
             execute=execute,
         )
 
-    # 2.商品诊断节点：DiagnosisAgent
     def diagnosis_node(state: AgentWorkflowState) -> dict[str, Any]:
-        """执行商品诊断节点"""
+        """执行商品诊断节点，从共享状态读取必要输入，并只返回当前节点负责的增量字段。"""
+        # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
         require_tool_permission(DIAGNOSIS_AGENT, "model.complete")
         context = ProductContext.model_validate(state["context"])
         max_tokens = remaining_model_tokens(state.get("budget"), state.get("usage"), 2200)
@@ -103,7 +105,6 @@ def build_product_operation_graph(*, checkpointer: Any, deps: AgentWorkflowDepen
             execute=execute,
         )
 
-    # 3.创意方案生成节点：CreativeStrategyAgent
     def creative_strategy_node(state: AgentWorkflowState) -> dict[str, Any]:
         """执行创意策略节点，从共享状态读取必要输入，并只返回当前节点负责的增量字段。"""
         # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
@@ -113,6 +114,8 @@ def build_product_operation_graph(*, checkpointer: Any, deps: AgentWorkflowDepen
         max_tokens = remaining_model_tokens(state.get("budget"), state.get("usage"), 3000)
 
         def execute() -> dict[str, Any]:
+            """执行创意策略节点的受观测业务步骤，并把结构化增量交回图节点。"""
+            # 创意 Agent 只消费已校验的商品上下文与诊断草稿，模型用量随后合并回共享状态。
             result = creative_agent.run(
                 context,
                 diagnosis,
@@ -136,9 +139,9 @@ def build_product_operation_graph(*, checkpointer: Any, deps: AgentWorkflowDepen
             execute=execute,
         )
 
-    # 4.质量审核节点：QualityReviewAgent
     def quality_review_node(state: AgentWorkflowState) -> dict[str, Any]:
         """执行质量审核节点，从共享状态读取必要输入，并只返回当前节点负责的增量字段。"""
+        # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
         diagnosis = DiagnosisDraft.model_validate(state["diagnosis"])
         creative_plans = [
             CreativePlanDraft.model_validate(item) for item in state["creative_plans"]
@@ -161,9 +164,9 @@ def build_product_operation_graph(*, checkpointer: Any, deps: AgentWorkflowDepen
             execute=execute,
         )
 
-    # 5.返修控制节点
     def prepare_revision_node(state: AgentWorkflowState) -> dict[str, Any]:
         """执行准备返修节点，从共享状态读取必要输入，并只返回当前节点负责的增量字段。"""
+        # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
         report = QualityReport.model_validate(state["quality_report"])
         update = {
             "revision_count": state.get("revision_count", 0) + 1,
@@ -182,9 +185,9 @@ def build_product_operation_graph(*, checkpointer: Any, deps: AgentWorkflowDepen
         )
         return update
 
-    # 6.人工审核节点
     def human_review_node(state: AgentWorkflowState) -> dict[str, Any]:
         """执行人工审核节点，从共享状态读取必要输入，并只返回当前节点负责的增量字段。"""
+        # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
         draft = _draft_from_state(state)
         # interrupt 之前不能产生副作用，否则恢复时节点从头执行会重复写入。
         resume_value = interrupt(
@@ -220,8 +223,9 @@ def build_product_operation_graph(*, checkpointer: Any, deps: AgentWorkflowDepen
             ),
         }
 
-    # 7.落库节点
     def finalize_node(state: AgentWorkflowState) -> dict[str, Any]:
+        """执行完成落库节点，从共享状态读取必要输入，并只返回当前节点负责的增量字段。"""
+        # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
         require_tool_permission(FINALIZE_NODE, "agent_output.persist")
         review = ReviewResumePayload.model_validate(state["review"])
         approved_output = None
@@ -261,15 +265,32 @@ def build_product_operation_graph(*, checkpointer: Any, deps: AgentWorkflowDepen
     graph.add_conditional_edges(
         QUALITY_REVIEW_AGENT,
         _quality_route,
-        {
-            "revise": "prepare_revision",
-            "review": HUMAN_REVIEW_GATE
-        },
+        {"revise": "prepare_revision", "review": HUMAN_REVIEW_GATE},
     )
     graph.add_edge("prepare_revision", DIAGNOSIS_AGENT)
     graph.add_edge(HUMAN_REVIEW_GATE, FINALIZE_NODE)
     graph.add_edge(FINALIZE_NODE, END)
     return graph.compile(checkpointer=checkpointer)
+
+
+def _quality_route(state: AgentWorkflowState) -> str:
+    """质量路由，依据结构化状态选择下一个已注册节点，避免隐式或无界跳转。"""
+    report = QualityReport.model_validate(state["quality_report"])
+    revision_count = state.get("revision_count", 0)
+    max_revisions = state.get("max_revisions", 1)
+    if not report.passed and revision_count < max_revisions:
+        return "revise"
+    return "review"
+
+
+def _draft_from_state(state: AgentWorkflowState) -> AgentDraftOutput:
+    """draftfrom状态；只交换结构化 Agent 状态或受控工具结果，支持 checkpoint、审计与恢复。"""
+    return AgentDraftOutput(
+        diagnosis=DiagnosisDraft.model_validate(state["diagnosis"]),
+        creative_plans=[
+            CreativePlanDraft.model_validate(item) for item in state["creative_plans"]
+        ],
+    )
 
 
 def _run_observed(
@@ -282,6 +303,7 @@ def _run_observed(
     execute: Callable[[], dict[str, Any]],
 ) -> dict[str, Any]:
     """执行可观测；只交换结构化 Agent 状态或受控工具结果，支持 checkpoint、审计与恢复。"""
+    # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
     tracer = trace.get_tracer("ecommerce_operation.agent_runtime")
     started_at = perf_counter()
     with tracer.start_as_current_span(f"agent.{agent_name}.{operation_name}") as span:
@@ -315,7 +337,6 @@ def _run_observed(
                 ),
             )
             raise
-        # 事件记录
         deps.record_event(
             state["run_id"],
             HarnessEvent(
@@ -338,21 +359,3 @@ def _span_ids(span: Any) -> tuple[str | None, str | None]:
     if not context.is_valid:
         return None, None
     return f"{context.trace_id:032x}", f"{context.span_id:016x}"
-
-def _quality_route(state: AgentWorkflowState) -> str:
-    """质量路由，依据结构化状态选择下一个已注册节点，避免隐式或无界跳转。"""
-    report = QualityReport.model_validate(state["quality_report"])
-    revision_count = state.get("revision_count", 0)
-    max_revisions = state.get("max_revisions", 1)
-    if not report.passed and revision_count < max_revisions:
-        return "revise"
-    return "review"
-
-def _draft_from_state(state: AgentWorkflowState) -> AgentDraftOutput:
-    """draftfrom状态；只交换结构化 Agent 状态或受控工具结果，支持 checkpoint、审计与恢复。"""
-    return AgentDraftOutput(
-        diagnosis=DiagnosisDraft.model_validate(state["diagnosis"]),
-        creative_plans=[
-            CreativePlanDraft.model_validate(item) for item in state["creative_plans"]
-        ],
-    )

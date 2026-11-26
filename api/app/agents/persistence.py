@@ -12,6 +12,6 @@ def open_postgres_checkpointer() -> Generator[Any, None, None]:
     """打开postgrescheckpointer，集中管理 PostgreSQL checkpoint 的连接、释放和失败边界。"""
     settings = get_settings()
     # 每个 Celery 任务独立持有连接上下文，避免 worker fork 后复用父进程数据库连接。
-    with PostgresSaver.from_conn_string(settings.checkpoint_database_url) as checkpointer:
+    with PostgresSaver.from_conn_string(settings.agent_checkpoint_connection_url) as checkpointer:
         checkpointer.setup()
         yield checkpointer

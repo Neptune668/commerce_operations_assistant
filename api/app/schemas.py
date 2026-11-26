@@ -5,14 +5,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
+from app.agents.contracts import AgentDraftOutput, ReviewResumePayload
 from app.models import AgentApprovalStatus, AgentMemoryStatus, AgentReviewDecision
 from app.models import AgentRiskLevel, AgentRunStatus, AgentTaskStatus, MembershipStatus
 from app.models import CreativePlanStatus, CreativePlanType, GenerationJobKind
 from app.models import GenerationJobStatus, InventoryMovementType, Platform
 from app.models import PlatformAccountStatus, ProductSkuStatus, StoreStatus, UserRole, UserStatus
 from app.models import WorkspaceStatus
-
-from app.agents.contracts import AgentDraftOutput, ReviewResumePayload
 
 
 class ProductBase(BaseModel):
@@ -392,6 +391,7 @@ class CompetitorMonitorRead(BaseModel):
     interval_days: int
     last_checked_at: datetime | None = None
     next_check_at: datetime | None = None
+    last_snapshot_id: int | None = None
     note: str | None = None
     created_at: datetime
     updated_at: datetime
@@ -691,6 +691,81 @@ class ProductDiagnosisRead(BaseModel):
     updated_at: datetime
 
 
+class AgentRunReviewCreate(ReviewResumePayload):
+    pass
+
+
+class AgentRunEventRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    event_type: str
+    agent_name: str | None = None
+    operation_name: str | None = None
+    status: str | None = None
+    message: str | None = None
+    input_snapshot: dict[str, Any] = Field(default_factory=dict)
+    output_snapshot: dict[str, Any] = Field(default_factory=dict)
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    trace_id: str | None = None
+    span_id: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AgentRunReviewRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    reviewed_by_user_id: int
+    decision: AgentReviewDecision
+    edited_output: dict[str, Any] = Field(default_factory=dict)
+    note: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AgentRunRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    thread_id: str
+    workspace_id: int | None = None
+    task_id: int | None = None
+    product_id: int | None = None
+    requested_by_user_id: int
+    workflow_key: str
+    workflow_version: str
+    attempt: int = 1
+    queue_name: str | None = None
+    status: AgentRunStatus
+    current_agent: str | None = None
+    revision_count: int
+    max_revisions: int
+    budget: dict[str, Any] = Field(default_factory=dict)
+    usage: dict[str, Any] = Field(default_factory=dict)
+    version_manifest: dict[str, Any] = Field(default_factory=dict)
+    context_snapshot: dict[str, Any] = Field(default_factory=dict)
+    draft_output: dict[str, Any] = Field(default_factory=dict)
+    quality_report: dict[str, Any] = Field(default_factory=dict)
+    final_output: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = None
+    lease_owner: str | None = None
+    lease_expires_at: datetime | None = None
+    timeout_at: datetime | None = None
+    cancel_requested_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+    events: list[AgentRunEventRead] = Field(default_factory=list)
+    reviews: list[AgentRunReviewRead] = Field(default_factory=list)
+
+
+class AgentRunDraftRead(BaseModel):
+    draft_output: AgentDraftOutput
+
+
 class GenerationJobRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -910,6 +985,11 @@ class WorkspaceAccessRead(BaseModel):
     membership: WorkspaceMembershipRead
 
 
+class AgentDefinitionRead(BaseModel):
+    key: str
+    version: str
+    description: str
+    tools: list[str] = Field(default_factory=list)
 
 
 class WorkflowDefinitionRead(BaseModel):
@@ -920,179 +1000,6 @@ class WorkflowDefinitionRead(BaseModel):
     agents: list[str] = Field(default_factory=list)
     required_context_any: list[str] = Field(default_factory=list)
     default_risk_level: AgentRiskLevel
-
-
-class DemoWorkspaceRead(BaseModel):
-    store_id: int
-    product_ids: list[int]
-    sku_ids: list[int]
-    message: str
-
-
-def _bounded_agent_json(value: dict[str, Any], *, max_bytes: int = 64 * 1024) -> dict[str, Any]:
-    """boundedAgentJSON，把配置或输入约束收敛为下游可直接使用的稳定数据。"""
-    encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str).encode()
-    if len(encoded) > max_bytes:
-        raise ValueError(f"Structured Agent payload exceeds {max_bytes} bytes")
-    return value
-
-
-class ProductImportRequest(BaseModel):
-    # commit=false 是导入预览，commit=true 才写库，保留运营人工确认导入的边界。
-    csv_text: str = Field(min_length=1)
-    commit: bool = False
-
-
-class ProductImportRowResult(BaseModel):
-    row_number: int
-    status: str
-    errors: list[str] = Field(default_factory=list)
-    product_id: int | None = None
-    product_name: str | None = None
-    store_name: str | None = None
-    platform: Platform | None = None
-
-
-class ProductImportResult(BaseModel):
-    commit: bool
-    total_rows: int
-    valid_rows: int
-    created_count: int
-    error_count: int
-    rows: list[ProductImportRowResult]
-
-
-class SkuInventoryImportRequest(BaseModel):
-    csv_text: str = Field(min_length=1)
-    commit: bool = False
-
-
-class SkuInventoryImportRowResult(BaseModel):
-    row_number: int
-    status: str
-    errors: list[str] = Field(default_factory=list)
-    product_id: int | None = None
-    product_name: str | None = None
-    sku_id: int | None = None
-    sku_code: str | None = None
-    sku_name: str | None = None
-
-
-class SkuInventoryImportResult(BaseModel):
-    commit: bool
-    total_rows: int
-    valid_rows: int
-    created_count: int
-    error_count: int
-    rows: list[SkuInventoryImportRowResult]
-
-
-class PerformanceImportRequest(BaseModel):
-    # 经营数据导入会影响投放复盘和实验统计，因此同样采用预览/提交两阶段。
-    csv_text: str = Field(min_length=1)
-    commit: bool = False
-
-
-class PerformanceImportRowResult(BaseModel):
-    row_number: int
-    status: str
-    errors: list[str] = Field(default_factory=list)
-    product_id: int | None = None
-    product_name: str | None = None
-    period_start: date | None = None
-    period_end: date | None = None
-    record_id: int | None = None
-
-
-class PerformanceImportResult(BaseModel):
-    commit: bool
-    total_rows: int
-    valid_rows: int
-    created_count: int
-    error_count: int
-    rows: list[PerformanceImportRowResult]
-
-
-class AgentRunReviewCreate(ReviewResumePayload):
-    pass
-
-
-class AgentRunEventRead(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    event_type: str
-    agent_name: str | None = None
-    operation_name: str | None = None
-    status: str | None = None
-    message: str | None = None
-    input_snapshot: dict[str, Any] = Field(default_factory=dict)
-    output_snapshot: dict[str, Any] = Field(default_factory=dict)
-    metrics: dict[str, Any] = Field(default_factory=dict)
-    trace_id: str | None = None
-    span_id: str | None = None
-    created_at: datetime
-    updated_at: datetime
-
-
-class AgentRunReviewRead(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    reviewed_by_user_id: int
-    decision: AgentReviewDecision
-    edited_output: dict[str, Any] = Field(default_factory=dict)
-    note: str | None = None
-    created_at: datetime
-    updated_at: datetime
-
-
-class AgentRunRead(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    thread_id: str
-    workspace_id: int | None = None
-    task_id: int | None = None
-    product_id: int | None = None
-    requested_by_user_id: int
-    workflow_key: str
-    workflow_version: str
-    attempt: int = 1
-    queue_name: str | None = None
-    status: AgentRunStatus
-    current_agent: str | None = None
-    revision_count: int
-    max_revisions: int
-    budget: dict[str, Any] = Field(default_factory=dict)
-    usage: dict[str, Any] = Field(default_factory=dict)
-    version_manifest: dict[str, Any] = Field(default_factory=dict)
-    context_snapshot: dict[str, Any] = Field(default_factory=dict)
-    draft_output: dict[str, Any] = Field(default_factory=dict)
-    quality_report: dict[str, Any] = Field(default_factory=dict)
-    final_output: dict[str, Any] = Field(default_factory=dict)
-    error: str | None = None
-    lease_owner: str | None = None
-    lease_expires_at: datetime | None = None
-    timeout_at: datetime | None = None
-    cancel_requested_at: datetime | None = None
-    started_at: datetime | None = None
-    finished_at: datetime | None = None
-    created_at: datetime
-    updated_at: datetime
-    events: list[AgentRunEventRead] = Field(default_factory=list)
-    reviews: list[AgentRunReviewRead] = Field(default_factory=list)
-
-
-class AgentRunDraftRead(BaseModel):
-    draft_output: AgentDraftOutput
-
-
-class AgentDefinitionRead(BaseModel):
-    key: str
-    version: str
-    description: str
-    tools: list[str] = Field(default_factory=list)
 
 
 class AgentCatalogRead(BaseModel):
@@ -1185,7 +1092,7 @@ class AgentTaskRead(BaseModel):
 
 
 class AgentApprovalDecisionCreate(BaseModel):
-    decision: Literal["approve", "reject","edit_and_approve"]
+    decision: Literal["approve", "reject"]
     note: str | None = Field(default=None, max_length=1000)
     decision_payload: dict[str, Any] = Field(default_factory=dict)
 
@@ -1263,3 +1170,94 @@ class AgentMemoryRead(BaseModel):
     revoked_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class DemoWorkspaceRead(BaseModel):
+    store_id: int
+    product_ids: list[int]
+    sku_ids: list[int]
+    message: str
+
+
+def _bounded_agent_json(value: dict[str, Any], *, max_bytes: int = 64 * 1024) -> dict[str, Any]:
+    """boundedAgentJSON，把配置或输入约束收敛为下游可直接使用的稳定数据。"""
+    encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str).encode()
+    if len(encoded) > max_bytes:
+        raise ValueError(f"Structured Agent payload exceeds {max_bytes} bytes")
+    return value
+
+
+class ProductImportRequest(BaseModel):
+    # commit=false 是导入预览，commit=true 才写库，保留运营人工确认导入的边界。
+    csv_text: str = Field(min_length=1)
+    commit: bool = False
+
+
+class ProductImportRowResult(BaseModel):
+    row_number: int
+    status: str
+    errors: list[str] = Field(default_factory=list)
+    product_id: int | None = None
+    product_name: str | None = None
+    store_name: str | None = None
+    platform: Platform | None = None
+
+
+class ProductImportResult(BaseModel):
+    commit: bool
+    total_rows: int
+    valid_rows: int
+    created_count: int
+    error_count: int
+    rows: list[ProductImportRowResult]
+
+
+class SkuInventoryImportRequest(BaseModel):
+    csv_text: str = Field(min_length=1)
+    commit: bool = False
+
+
+class SkuInventoryImportRowResult(BaseModel):
+    row_number: int
+    status: str
+    errors: list[str] = Field(default_factory=list)
+    product_id: int | None = None
+    product_name: str | None = None
+    sku_id: int | None = None
+    sku_code: str | None = None
+    sku_name: str | None = None
+
+
+class SkuInventoryImportResult(BaseModel):
+    commit: bool
+    total_rows: int
+    valid_rows: int
+    created_count: int
+    error_count: int
+    rows: list[SkuInventoryImportRowResult]
+
+
+class PerformanceImportRequest(BaseModel):
+    # 经营数据导入会影响投放复盘和实验统计，因此同样采用预览/提交两阶段。
+    csv_text: str = Field(min_length=1)
+    commit: bool = False
+
+
+class PerformanceImportRowResult(BaseModel):
+    row_number: int
+    status: str
+    errors: list[str] = Field(default_factory=list)
+    product_id: int | None = None
+    product_name: str | None = None
+    period_start: date | None = None
+    period_end: date | None = None
+    record_id: int | None = None
+
+
+class PerformanceImportResult(BaseModel):
+    commit: bool
+    total_rows: int
+    valid_rows: int
+    created_count: int
+    error_count: int
+    rows: list[PerformanceImportRowResult]

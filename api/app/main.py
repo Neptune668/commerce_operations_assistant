@@ -1,14 +1,31 @@
-import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from app.api.routes import auth, health, products, promotion_links, stores, users, workspace, model_settings, \
-    agent_runs, agent_platform
-from app.core.config import API_DIR, get_settings
+from app.api.routes import (
+    agent_platform,
+    agent_runs,
+    auth,
+    health,
+    model_settings,
+    products,
+    promotion_links,
+    stores,
+    users,
+    workspace,
+)
+from app.core.config import API_DIR
+from app.core.config import get_settings
+from app.observability import configure_observability
+
 
 settings = get_settings()
-app = FastAPI(title=settings.app_name + " 基础业务")
+configure_observability()
+uploads_dir = API_DIR / "uploads"
+uploads_dir.mkdir(parents=True, exist_ok=True)
+
+app = FastAPI(title=settings.app_name)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -18,16 +35,13 @@ app.add_middleware(
 )
 
 app.include_router(health.router)
-for route in [auth, products, promotion_links, stores, users, workspace,model_settings,agent_runs, agent_platform]:
-    app.include_router(route.router, prefix="/api/v1")
-
-uploads_dir = API_DIR / "uploads"
-uploads_dir.mkdir(parents=True, exist_ok=True)
+app.include_router(auth.router, prefix="/api/v1")
+app.include_router(agent_platform.router, prefix="/api/v1")
+app.include_router(agent_runs.router, prefix="/api/v1")
+app.include_router(products.router, prefix="/api/v1")
+app.include_router(stores.router, prefix="/api/v1")
+app.include_router(promotion_links.router, prefix="/api/v1")
+app.include_router(model_settings.router, prefix="/api/v1")
+app.include_router(users.router, prefix="/api/v1")
+app.include_router(workspace.router, prefix="/api/v1")
 app.mount("/uploads", StaticFiles(directory=uploads_dir), name="uploads")
-
-if __name__ == '__main__':
-    print("Hello from api!")
-    uvicorn.run("app.main:app", host="127.0.0.1", port=8000, reload=True)
-
-
-# uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
