@@ -21,10 +21,8 @@ from app.services.llm import (
     create_json_chat_completion,
 )
 
-
 class ModelCallResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
     output: dict[str, Any]
     model: str | None = None
     usage: ModelUsage = Field(default_factory=ModelUsage)
@@ -39,19 +37,11 @@ class CompletionClient(Protocol):
         max_tokens: int,
         temperature: float,
     ) -> ModelCallResult:
-        """执行 CompletionClient 封装的调用协议，并返回本次处理结果。"""
         ...
 
-
-def default_completion_client(
-    *,
-    agent_name: str,
-    messages: list[dict[str, str]],
-    max_tokens: int,
-    temperature: float,
-) -> ModelCallResult:
+# Agent调用模型的统一入口
+def default_completion_client(*,agent_name: str,messages: list[dict[str, str]],max_tokens: int,temperature: float,) -> ModelCallResult:
     """默认模型补全client，把领域输入转换为结构化候选结果，并保留规则兜底和模型用量。"""
-    # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
     parsed, raw_response = create_json_chat_completion(
         messages,
         max_tokens=max_tokens,
@@ -63,16 +53,15 @@ def default_completion_client(
         usage=normalize_model_usage(raw_response.get("usage")),
     )
 
-
+# 专业节点执行结果的输出载体
 @dataclass(frozen=True)
 class SpecialistResult:
     output: dict[str, Any] | list[dict[str, Any]]
     usage: ModelUsage
 
-
+# 【商品诊断Agent】
 class DiagnosisAgent:
     def __init__(self, completion_client: CompletionClient) -> None:
-        """初始化 DiagnosisAgent 的依赖与运行状态，避免执行阶段临时拼装共享资源。"""
         self.completion_client = completion_client
 
     def run(
@@ -83,8 +72,8 @@ class DiagnosisAgent:
         revision_feedback: list[dict[str, Any]] | None = None,
     ) -> SpecialistResult:
         """执行，把领域输入转换为结构化候选结果，并保留规则兜底和模型用量。"""
-        # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
         try:
+            # 构造模型调用参数
             result = self.completion_client(
                 agent_name="diagnosis_agent",
                 messages=_diagnosis_messages(context, revision_feedback or []),
@@ -106,10 +95,9 @@ class DiagnosisAgent:
 class _CreativePlansOutput(BaseModel):
     plans: list[dict[str, Any]] = Field(min_length=3, max_length=6)
 
-
+# 【创意方案Agent】
 class CreativeStrategyAgent:
     def __init__(self, completion_client: CompletionClient) -> None:
-        """初始化 CreativeStrategyAgent 的依赖与运行状态，避免执行阶段临时拼装共享资源。"""
         self.completion_client = completion_client
 
     def run(
@@ -121,7 +109,6 @@ class CreativeStrategyAgent:
         revision_feedback: list[dict[str, Any]] | None = None,
     ) -> SpecialistResult:
         """执行，把领域输入转换为结构化候选结果，并保留规则兜底和模型用量。"""
-        # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
         try:
             result = self.completion_client(
                 agent_name="creative_strategy_agent",
@@ -150,8 +137,9 @@ class CreativeStrategyAgent:
             ]
             return SpecialistResult(plans, ModelUsage())
 
-
+# 【质量审核Agent】
 class QualityReviewAgent:
+
     BANNED_CLAIMS = ("全网第一", "百分百", "100%有效", "绝对", "保证治愈", "永久")
 
     def run(
@@ -160,7 +148,6 @@ class QualityReviewAgent:
         creative_plans: list[CreativePlanDraft],
     ) -> QualityReport:
         """执行，把领域输入转换为结构化候选结果，并保留规则兜底和模型用量。"""
-        # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
         issues: list[QualityIssue] = []
         if len(diagnosis.recommendations) < 2:
             issues.append(
@@ -180,7 +167,7 @@ class QualityReviewAgent:
                     message="至少需要三个可测试的创意方向。",
                 )
             )
-
+        # 创意方案的创意角度审核
         angles = [plan.angle.strip().lower() for plan in creative_plans]
         if len(set(angles)) != len(angles):
             issues.append(
@@ -191,7 +178,7 @@ class QualityReviewAgent:
                     message="创意测试角度存在重复，需要拉开差异。",
                 )
             )
-
+        # 创意文案的敏感词过滤
         for index, plan in enumerate(creative_plans):
             claim_text = " ".join([plan.headline, plan.sub_headline, plan.visual_focus])
             for banned_claim in self.BANNED_CLAIMS:
@@ -213,7 +200,7 @@ class QualityReviewAgent:
                         message="创意方向缺少证明点，人工审核时应补充。",
                     )
                 )
-
+        # 创意文案的证明点审核
         error_count = sum(issue.severity == "error" for issue in issues)
         warning_count = sum(issue.severity == "warning" for issue in issues)
         score = max(0, 100 - error_count * 20 - warning_count * 5)
@@ -232,12 +219,9 @@ class QualityReviewAgent:
         )
 
 
-def _diagnosis_messages(
-    context: ProductContext,
-    revision_feedback: list[dict[str, Any]],
-) -> list[dict[str, str]]:
+# 构造商品诊断模型调用提示词
+def _diagnosis_messages(context: ProductContext,revision_feedback: list[dict[str, Any]],) -> list[dict[str, str]]:
     """商品诊断消息，把领域输入转换为结构化候选结果，并保留规则兜底和模型用量。"""
-    # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
     return [
         {
             "role": "system",
@@ -258,12 +242,8 @@ def _diagnosis_messages(
         },
     ]
 
-
-def _creative_messages(
-    context: ProductContext,
-    diagnosis: DiagnosisDraft,
-    revision_feedback: list[dict[str, Any]],
-) -> list[dict[str, str]]:
+# 构造创意方案模型调用提示词
+def _creative_messages(context: ProductContext,diagnosis: DiagnosisDraft,revision_feedback: list[dict[str, Any]],) -> list[dict[str, str]]:
     """创意消息，把领域输入转换为结构化候选结果，并保留规则兜底和模型用量。"""
     # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
     return [
@@ -287,10 +267,9 @@ def _creative_messages(
         },
     ]
 
-
+# 规则生成商品诊断
 def _rule_based_diagnosis(context: ProductContext, *, fallback_reason: str) -> DiagnosisDraft:
     """rulebased商品诊断，把领域输入转换为结构化候选结果，并保留规则兜底和模型用量。"""
-    # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
     competitor_prices = [_decimal(item.price) for item in context.competitors]
     competitor_prices = [price for price in competitor_prices if price is not None]
     product_price = _decimal(context.price)
@@ -332,13 +311,8 @@ def _rule_based_diagnosis(context: ProductContext, *, fallback_reason: str) -> D
         provenance={"fallback_reason": fallback_reason[:500]},
     )
 
-
-def _rule_based_creative_plans(
-    context: ProductContext,
-    diagnosis: DiagnosisDraft,
-    *,
-    fallback_reason: str,
-) -> list[CreativePlanDraft]:
+# 规则生成创意方案
+def _rule_based_creative_plans(context: ProductContext,diagnosis: DiagnosisDraft,*,fallback_reason: str) -> list[CreativePlanDraft]:
     """rulebased创意plans，把领域输入转换为结构化候选结果，并保留规则兜底和模型用量。"""
     # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
     focus_points = list(context.selling_points[:3])
@@ -372,7 +346,6 @@ def _rule_based_creative_plans(
 
 def _decimal(value: str | None) -> Decimal | None:
     """小数，把领域输入转换为结构化候选结果，并保留规则兜底和模型用量。"""
-    # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
     if value is None:
         return None
     try:

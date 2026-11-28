@@ -45,7 +45,6 @@ def build_platform_workflow_graph(
 
     def specialist_node(agent_key: str):
         """执行领域 Agent节点，从共享状态读取必要输入，并只返回当前节点负责的增量字段。"""
-        # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
         def execute(state: PlatformWorkflowState) -> dict[str, Any]:
             """执行领域 Agent节点的受观测业务步骤，并把结构化增量交回图节点。"""
             # 每个领域 Agent 只追加自己的输出键，保留前序结果供后续节点与质量门读取。
@@ -142,14 +141,20 @@ def build_platform_workflow_graph(
         graph.add_conditional_edges(
             "quality_compliance",
             route_after_quality,
-            {"passed": "approval_gate", "failed": "quality_failed"},
+            {
+                "passed": "approval_gate",
+                "failed": "quality_failed"
+            },
         )
         graph.add_edge("approval_gate", "finalize")
     else:
         graph.add_conditional_edges(
             "quality_compliance",
             route_after_quality,
-            {"passed": "finalize", "failed": "quality_failed"},
+            {
+                "passed": "finalize",
+                "failed": "quality_failed"
+            },
         )
     graph.add_edge("finalize", END)
     graph.add_edge("quality_failed", END)

@@ -2,7 +2,18 @@ from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
 
-from sqlalchemy import Date, DateTime, Enum, ForeignKey, JSON, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    JSON,
+    Date,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -102,8 +113,8 @@ class AgentApprovalStatus(StrEnum):
 class AgentRiskLevel(StrEnum):
     R0 = "R0"
     R1 = "R1"
-    R2 = "R2"
-    R3 = "R3"
+    R2 = "R2"   # 高风险等级
+    R3 = "R3"   # 高风险等级
 
 
 class AgentMemoryStatus(StrEnum):
@@ -553,7 +564,7 @@ class Competitor(TimestampMixin, Base):
 class CompetitorMonitor(TimestampMixin, Base):
     __tablename__ = "competitor_monitors"
 
-    # 竞品监控是轻量定期复查入口，只保存任务节奏和最后快照，不实现大规模爬虫。
+    # 竞品监控是轻量定期复查入口，只保存任务节奏，不实现大规模爬虫。
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), nullable=False, index=True)
     competitor_id: Mapped[int] = mapped_column(ForeignKey("competitors.id"), nullable=False, index=True)
@@ -561,7 +572,6 @@ class CompetitorMonitor(TimestampMixin, Base):
     interval_days: Mapped[int] = mapped_column(default=1, nullable=False)
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     next_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
-    last_snapshot_id: Mapped[int | None] = mapped_column(ForeignKey("competitor_monitor_snapshots.id"))
     note: Mapped[str | None] = mapped_column(Text)
 
     product: Mapped[Product] = relationship(back_populates="competitor_monitors")
@@ -572,12 +582,6 @@ class CompetitorMonitor(TimestampMixin, Base):
         foreign_keys="CompetitorMonitorSnapshot.monitor_id",
         order_by="CompetitorMonitorSnapshot.checked_at.desc()",
     )
-    last_snapshot: Mapped["CompetitorMonitorSnapshot | None"] = relationship(
-        foreign_keys=[last_snapshot_id],
-        post_update=True,
-    )
-
-
 class CompetitorMonitorSnapshot(Base):
     __tablename__ = "competitor_monitor_snapshots"
 

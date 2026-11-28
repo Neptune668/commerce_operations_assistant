@@ -70,7 +70,7 @@ def list_workspaces(
     db: SessionDep,
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> list[dict]:
-    """处理查询workspaces接口；完成身份、Workspace、资源归属和输入校验后返回结构化结果。"""
+    """处理查询workspaces接口"""
     return [
         {"workspace": workspace, "membership": membership}
         for workspace, membership in list_user_workspaces(db, user=current_user)
@@ -79,8 +79,7 @@ def list_workspaces(
 
 @router.get("/workspaces/{workspace_id}/agent/catalog", response_model=AgentCatalogRead)
 def get_agent_catalog(workspace_id: int, access: WorkspaceDep) -> AgentCatalogRead:
-    """处理获取Agentcatalog接口；完成身份、Workspace、资源归属和输入校验后返回结构化结果。"""
-    # 先完成认证、Workspace 与资源归属校验，再进入会产生副作用的服务调用。
+    """处理获取Agentcatalog接口"""
     _require_path_workspace(workspace_id, access)
     coordinator = AGENT_REGISTRY[COORDINATOR_AGENT]
     return AgentCatalogRead(
@@ -117,7 +116,7 @@ def create_conversation(
     db: SessionDep,
     access: WorkspaceEditDep,
 ) -> AgentConversation:
-    """处理创建会话接口；完成身份、Workspace、资源归属和输入校验后返回结构化结果。"""
+    """处理创建会话接口"""
     # 先完成认证、Workspace 与资源归属校验，再进入会产生副作用的服务调用。
     _require_path_workspace(workspace_id, access)
     conversation = AgentConversation(
@@ -142,7 +141,7 @@ def list_conversations(
     access: WorkspaceDep,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> list[AgentConversation]:
-    """处理查询conversations接口；完成身份、Workspace、资源归属和输入校验后返回结构化结果。"""
+    """处理查询conversations接口"""
     # 先完成认证、Workspace 与资源归属校验，再进入会产生副作用的服务调用。
     _require_path_workspace(workspace_id, access)
     return list(
@@ -167,7 +166,7 @@ def create_conversation_message(
     db: SessionDep,
     access: WorkspaceEditDep,
 ) -> AgentConversationMessage:
-    """处理创建会话消息接口；完成身份、Workspace、资源归属和输入校验后返回结构化结果。"""
+    """处理创建会话消息接口"""
     # 先完成认证、Workspace 与资源归属校验，再进入会产生副作用的服务调用。
     _require_path_workspace(workspace_id, access)
     conversation = db.get(AgentConversation, conversation_id)
@@ -194,12 +193,11 @@ def create_conversation_message(
 )
 def create_task(
     workspace_id: int,
-    payload: AgentTaskCreate,
+    payload: AgentTaskCreate,  # workflow_key   intent
     db: SessionDep,
     access: WorkspaceEditDep,
 ) -> AgentTask:
-    """处理创建任务接口；完成身份、Workspace、资源归属和输入校验后返回结构化结果。"""
-    # 先完成认证、Workspace 与资源归属校验，再进入会产生副作用的服务调用。
+    """处理创建任务接口"""
     _require_path_workspace(workspace_id, access)
     try:
         task, _run, _event = create_agent_task(
@@ -232,7 +230,7 @@ def list_tasks(
     task_status: AgentTaskStatus | None = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> list[AgentTask]:
-    """处理查询tasks接口；完成身份、Workspace、资源归属和输入校验后返回结构化结果。"""
+    """处理查询tasks接口"""
     # 先完成认证、Workspace 与资源归属校验，再进入会产生副作用的服务调用。
     _require_path_workspace(workspace_id, access)
     statement = select(AgentTask).where(AgentTask.workspace_id == workspace_id)
@@ -243,7 +241,7 @@ def list_tasks(
 
 @router.get("/workspaces/{workspace_id}/agent/tasks/{task_id}", response_model=AgentTaskRead)
 def get_task(workspace_id: int, task_id: int, db: SessionDep, access: WorkspaceDep) -> AgentTask:
-    """处理获取任务接口；完成身份、Workspace、资源归属和输入校验后返回结构化结果。"""
+    """处理获取任务接口"""
     _require_path_workspace(workspace_id, access)
     return _task_or_404(db, workspace_id=workspace_id, task_id=task_id)
 
@@ -258,7 +256,7 @@ def list_task_runs(
     db: SessionDep,
     access: WorkspaceDep,
 ) -> list[AgentRun]:
-    """处理查询任务runs接口；完成身份、Workspace、资源归属和输入校验后返回结构化结果。"""
+    """处理查询任务runs接口"""
     # 先完成认证、Workspace 与资源归属校验，再进入会产生副作用的服务调用。
     _require_path_workspace(workspace_id, access)
     _task_or_404(db, workspace_id=workspace_id, task_id=task_id)
@@ -281,7 +279,7 @@ def cancel_task(
     db: SessionDep,
     access: WorkspaceEditDep,
 ) -> AgentTask:
-    """处理取消任务接口；完成身份、Workspace、资源归属和输入校验后返回结构化结果。"""
+    """处理取消任务接口"""
     # 先完成认证、Workspace 与资源归属校验，再进入会产生副作用的服务调用。
     _require_path_workspace(workspace_id, access)
     task = _task_or_404(db, workspace_id=workspace_id, task_id=task_id, for_update=True)
@@ -322,9 +320,13 @@ def decide_approval(
     db: SessionDep,
     access: WorkspaceEditDep,
 ) -> AgentApproval:
-    """处理处理决策审批接口；完成身份、Workspace、资源归属和输入校验后返回结构化结果。"""
-    # 先完成认证、Workspace 与资源归属校验，再进入会产生副作用的服务调用。
-    _require_path_workspace(workspace_id, access)
+    """处理处理决策审批接口"""
+    print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+    print(payload.decision)
+    print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+    print(payload.decision_payload)
+    print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+    # _require_path_workspace(workspace_id, access)
     approval = db.scalar(
         select(AgentApproval)
         .where(AgentApproval.id == approval_id, AgentApproval.workspace_id == workspace_id)
@@ -367,7 +369,7 @@ def list_memories(
     access: WorkspaceDep,
     include_inactive: bool = False,
 ) -> list[AgentMemory]:
-    """处理查询memories接口；完成身份、Workspace、资源归属和输入校验后返回结构化结果。"""
+    """处理查询memories接口"""
     # 先完成认证、Workspace 与资源归属校验，再进入会产生副作用的服务调用。
     _require_path_workspace(workspace_id, access)
     statement = select(AgentMemory).where(AgentMemory.workspace_id == workspace_id)
@@ -394,7 +396,7 @@ def create_memory(
     db: SessionDep,
     access: WorkspaceEditDep,
 ) -> AgentMemory:
-    """处理创建记忆接口；完成身份、Workspace、资源归属和输入校验后返回结构化结果。"""
+    """处理创建记忆接口"""
     # 先完成认证、Workspace 与资源归属校验，再进入会产生副作用的服务调用。
     _require_path_workspace(workspace_id, access)
     try:
@@ -422,7 +424,7 @@ def revoke_memory(
     db: SessionDep,
     access: WorkspaceEditDep,
 ) -> AgentMemory:
-    """处理撤销记忆接口；完成身份、Workspace、资源归属和输入校验后返回结构化结果。"""
+    """处理撤销记忆接口"""
     # 先完成认证、Workspace 与资源归属校验，再进入会产生副作用的服务调用。
     _require_path_workspace(workspace_id, access)
     memory = db.get(AgentMemory, memory_id)
@@ -445,7 +447,7 @@ def revoke_memory(
 
 
 def _require_path_workspace(workspace_id: int, access: WorkspaceAccess) -> None:
-    """处理校验并获取pathWorkspace接口；完成身份、Workspace、资源归属和输入校验后返回结构化结果。"""
+    """处理校验并获取pathWorkspace接口"""
     if access.workspace.id != workspace_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Workspace path does not match membership")
 
@@ -457,7 +459,7 @@ def _task_or_404(
     task_id: int,
     for_update: bool = False,
 ) -> AgentTask:
-    """处理任务or404接口；完成身份、Workspace、资源归属和输入校验后返回结构化结果。"""
+    """处理任务or404接口"""
     # 先完成认证、Workspace 与资源归属校验，再进入会产生副作用的服务调用。
     statement = select(AgentTask).where(
         AgentTask.id == task_id,
@@ -472,7 +474,7 @@ def _task_or_404(
 
 
 def _agent_read(definition) -> AgentDefinitionRead:
-    """处理Agent读取接口；完成身份、Workspace、资源归属和输入校验后返回结构化结果。"""
+    """处理Agent读取接口"""
     return AgentDefinitionRead(
         key=definition.key,
         version=definition.version,

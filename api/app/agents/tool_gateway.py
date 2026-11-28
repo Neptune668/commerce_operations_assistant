@@ -48,8 +48,8 @@ class ToolExecutionContext:
 
 
 class ToolGateway:
+
     def __init__(self, context: ToolExecutionContext) -> None:
-        """初始化 ToolGateway 的依赖与运行状态，避免执行阶段临时拼装共享资源。"""
         self.context = context
 
     def execute(
@@ -59,36 +59,45 @@ class ToolGateway:
         tool_key: str,
         input_payload: dict[str, Any],
     ) -> dict[str, Any] | list[dict[str, Any]]:
-        """执行，在工具执行前复核租户、角色、租约和幂等键，并记录操作结果。"""
-        # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
+        # 1.生成工具操作记录的key
         operation_key = f"tool:{agent_key}:{tool_key}"
         with SessionLocal() as db:
+            # 2.获取AgentRun
             run = require_active_lease(
                 db,
                 run_id=self.context.run_id,
                 lease_owner=self.context.lease_owner,
                 for_update=True,
             )
+            # 3.租户权限校验
             if run.workspace_id != self.context.workspace_id:
                 raise AgentPolicyError("Agent run is outside current Workspace")
+
+            # 4.验证agent工具权限
             current_role = self._current_workspace_role(db)
             decision = authorize_tool(
                 agent_key=agent_key,
                 tool_key=tool_key,
                 workspace_role=current_role,
             )
+            # 如果agent不具备调用权限
             if not decision.allowed:
                 raise AgentPolicyError(decision.reason)
+            # 如果此工具调用需要人工确认，抛出了ToolApprovalRequired异常
             if decision.requires_approval:
                 raise ToolApprovalRequired(
                     f"Tool {tool_key} requires {decision.risk_level.value} approval"
                 )
+
+            # 5.工具调用的幂等性校验
             operation = db.scalar(
                 select(AgentRunOperation).where(
                     AgentRunOperation.run_id == self.context.run_id,
                     AgentRunOperation.operation_key == operation_key,
                 )
             )
+            # 如果同一个AgentRun中的同一个Agent调用过这个工具，并且状态是completed
+            # 则直接返回上一次的调用结果
             if operation is not None and operation.status == "completed":
                 return operation.result.get("value", operation.result)
             if operation is None:
@@ -100,10 +109,14 @@ class ToolGateway:
                 )
                 db.add(operation)
                 db.flush()
+
+            # 6.执行工具
             try:
                 result = self._execute_tool(db, tool_key=tool_key, input_payload=input_payload)
             except Exception as exc:
+                # 如果工具调用失败，则先回滚
                 db.rollback()
+                # 然后记录操作失败
                 self._record_operation_failure(operation_key, exc)
                 raise
             operation.status = "completed"
@@ -205,30 +218,8 @@ class ToolGateway:
             raise AgentPolicyError("Store tool scope is outside current Workspace")
         return store
 
-    def _creative_plans(self, db, *, product_id: int) -> dict[str, Any]:
-        """创意plans，在工具执行前复核租户、角色、租约和幂等键，并记录操作结果。"""
-        # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
-        product = self._product(db, product_id)
-        diagnosis = db.scalar(
-            select(ProductDiagnosis)
-            .where(ProductDiagnosis.product_id == product.id)
-            .order_by(ProductDiagnosis.id.desc())
-            .limit(1)
-        )
-        return {
-            "main_image_plans": generate_main_image_plans(product, diagnosis),
-            "video_script_plans": generate_video_script_plans(product, diagnosis),
-        }
-
-    def _run_competitor_monitors(
-        self,
-        db,
-        *,
-        product_id: int | None,
-        store_id: int | None,
-    ) -> list[dict[str, Any]]:
-        """执行竞品monitors，在工具执行前复核租户、角色、租约和幂等键，并记录操作结果。"""
-        # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
+    def _run_competitor_monitors(self,db, *,product_id: int | None,store_id: int | None,) -> list[dict[str, Any]]:
+        # 1.查询当前商品的竞品信息
         statement = select(CompetitorMonitor).join(
             Product,
             Product.id == CompetitorMonitor.product_id,
@@ -237,6 +228,7 @@ class ToolGateway:
             Product.workspace_id == self.context.workspace_id,
             CompetitorMonitor.status == "active",
         )
+        # 2.查询商品信息和店铺信息
         if product_id is not None:
             self._product(db, product_id)
             statement = statement.where(CompetitorMonitor.product_id == int(product_id))
@@ -245,6 +237,7 @@ class ToolGateway:
             statement = statement.where(Product.store_id == int(store_id))
         else:
             raise AgentPolicyError("Competitor monitor tool requires product_id or store_id")
+        # 3.调用原有的业务能力进行竞品分析
         snapshots = [run_competitor_monitor(db, monitor) for monitor in db.scalars(statement).all()]
         return [
             {
@@ -257,6 +250,22 @@ class ToolGateway:
             for snapshot in snapshots
         ]
 
+    def _creative_plans(self, db, *, product_id: int) -> dict[str, Any]:
+        # 1.查询商品信息
+        product = self._product(db, product_id)
+        # 2.获取商品的诊断信息
+        diagnosis = db.scalar(
+            select(ProductDiagnosis)
+            .where(ProductDiagnosis.product_id == product.id)
+            .order_by(ProductDiagnosis.id.desc())
+            .limit(1)
+        )
+        # 3.生成主图方案和视频脚本
+        return {
+            "main_image_plans": generate_main_image_plans(product, diagnosis),
+            "video_script_plans": generate_video_script_plans(product, diagnosis),
+        }
+
     def _inventory_advice(self, db, *, store_id: int) -> dict[str, Any]:
         """库存建议，在工具执行前复核租户、角色、租约和幂等键，并记录操作结果。"""
         store = self._store(db, store_id)
@@ -264,8 +273,7 @@ class ToolGateway:
         return generate_inventory_advice(store, rows)
 
     def _inventory_rows(self, db, *, store_id: int) -> list[StoreInventoryRow]:
-        """库存行，在工具执行前复核租户、角色、租约和幂等键，并记录操作结果。"""
-        # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
+        # 根据店铺ID查询sku库存信息
         statement = (
             select(ProductSku, Product, InventoryItem)
             .join(Product, ProductSku.product_id == Product.id)

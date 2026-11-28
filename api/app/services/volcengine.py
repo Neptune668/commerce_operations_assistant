@@ -1,16 +1,15 @@
-from datetime import UTC, datetime
 import hashlib
 import hmac
-from urllib.parse import urlencode, urlparse
-
+from datetime import datetime, UTC
+from urllib.parse import urlparse, urlencode
 
 class VolcengineCredentialsError(RuntimeError):
+    """服务商凭证错误；密钥缺失或格式不符合要求时抛出。"""
     pass
 
 
 def parse_access_key_pair(api_key: str | None) -> tuple[str, str]:
-    """解析访问keypair；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
-    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
+    """解析配置中的服务商访问密钥对，返回访问密钥与私密密钥。"""
     if not api_key or ":" not in api_key:
         raise VolcengineCredentialsError(
             "Jimeng provider expects api_key in 'VOLC_ACCESS_KEY:VOLC_SECRET_KEY' format."
@@ -37,8 +36,7 @@ def signed_json_headers(
     service: str = "cv",
     request_time: datetime | None = None,
 ) -> dict[str, str]:
-    """签名JSONheaders；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
-    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
+    """生成带签名的 JSON 请求头，供服务商接口直接携带使用。"""
     request_time = request_time or datetime.now(UTC)
     x_date = request_time.strftime("%Y%m%dT%H%M%SZ")
     short_date = request_time.strftime("%Y%m%d")
@@ -87,7 +85,6 @@ def signed_json_headers(
         "X-Date": x_date,
     }
 
-
 def _signing_signature(
     secret_key: str,
     short_date: str,
@@ -95,9 +92,8 @@ def _signing_signature(
     service: str,
     string_to_sign: str,
 ) -> str:
-    """signingsignature，统一主流程中的格式、默认值和异常边界。"""
-    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
-    key = _hmac(f"VOLC{secret_key}".encode("utf-8"), short_date)
+    """按日期、区域、服务、request 四级派生密钥，计算出最终签名。"""
+    key = _hmac(secret_key.encode("utf-8"), short_date)
     key = _hmac(key, region)
     key = _hmac(key, service)
     key = _hmac(key, "request")
@@ -105,5 +101,5 @@ def _signing_signature(
 
 
 def _hmac(key: bytes, message: str) -> bytes:
-    """HMAC，统一主流程中的格式、默认值和异常边界。"""
+    """对单次 HMAC-SHA256 计算做统一封装。"""
     return hmac.new(key, message.encode("utf-8"), hashlib.sha256).digest()

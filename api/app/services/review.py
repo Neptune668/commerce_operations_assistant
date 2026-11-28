@@ -20,7 +20,7 @@ class ReviewReportOutput(BaseModel):
 
 def enrich_performance_metrics(payload: dict) -> dict:
     # 只在用户未填报指标时补算，保留平台报表已有 CTR、CVR、ROI 的原始口径。
-    """补充经营数据metrics；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
+    """补充经营数据指标；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
     # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     impressions = payload.get("impressions")
     clicks = payload.get("clicks")
@@ -279,7 +279,7 @@ def _next_actions(
     experiment_name: str | None = None,
 ) -> list[str]:
     # 下一步动作只给运营建议，不会在这里改变实验状态、预算或素材审核结果。
-    """下次actions，统一主流程中的格式、默认值和异常边界。"""
+    """下一步动作，统一主流程中的格式、默认值和异常边界。"""
     # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     actions = []
 
@@ -309,7 +309,7 @@ def _format_decimal(value: Decimal | None) -> str:
 
 
 def _format_percent(value: Decimal | None) -> str:
-    """格式化percent，统一主流程中的格式、默认值和异常边界。"""
+    """格式化百分比，统一主流程中的格式、默认值和异常边界。"""
     if value is None:
         return "-"
     return f"{value * Decimal('100'):.2f}%"
