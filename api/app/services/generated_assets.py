@@ -11,19 +11,8 @@ def create_generated_asset(
     asset: dict,
     generation_job_id: int | None = None,
 ) -> GeneratedAsset:
-    """
-    {
-        'provider': 'jimeng',
-        'model': 'jimeng_t2i_v30',
-        'size': '1024*1024',
-        'prompt': '办公桌俯拍视角，5-6包独立小包装每日坚果扇形铺开，包装清晰有质感，旁边有笔记本电脑和咖啡杯虚化背景，左上角留白放文案，右下角放价格标签，明亮自然光，真实摄影风格',
-        'task_id': '11275500638173950835',
-        'source_url': 'https://p26-aiop-sign.byteimg.com/tos-cn-i-vuqhorh59i/2026111714172402849C2A0FAC000C87AD-5863-0~tplv-vuqhorh59i-image-v1.image?rk3s=7f9e702d&x-expires=1794982645&x-signature=K1OLLxN6fe8DiWXJ%2FXNzyNMpYP4%3D',
-        'url': '/uploads/generated/main-image-plan-1-e509f20b21a948abbbd939a7a95c654c.png',
-        'created_at': 1794896258
-    }
-    """
-    # 按照素材的url去重
+    """创建生成素材；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     existing = db.scalars(
         select(GeneratedAsset).where(GeneratedAsset.url == asset["url"])
     ).first()
@@ -56,6 +45,7 @@ def create_generated_asset(
 
 def sync_generated_assets_from_creative_plans(db: Session, product_id: int) -> int:
     """同步生成素材from创意plans；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     creative_plans = db.scalars(
         select(CreativePlan).where(CreativePlan.product_id == product_id)
     ).all()
@@ -90,6 +80,7 @@ def _count_assets(db: Session, url: str) -> int:
 
 def _asset_columns() -> set[str]:
     """素材columns，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     return {
         "duration",
         "asset_version",

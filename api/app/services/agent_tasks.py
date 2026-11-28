@@ -116,7 +116,7 @@ def _enforce_workspace_concurrency(db: Session, *, workspace_id: int) -> None:
     if int(active_count or 0) >= 10:
         raise AgentTaskConflictError("Workspace has reached the 10-run concurrency limit")
 
-# 创建AgentTask(任务)、AgentRun（任务执行租约）、AgentRunEvent（执行事件记录）、OutboxEvent（pending）
+# 创建AgentTask
 def create_agent_task(db:Session,*, workspace_id: int, requested_by: User,payload: AgentTaskCreate)->tuple[AgentTask,AgentRun,OutboxEvent]:
     # 1.解析payload，获取对应的workflow_key
     workflow: WorkflowDefinition = _resolve_workflow(db, workspace_id=workspace_id, payload=payload)
@@ -282,7 +282,6 @@ def decide_agent_approval(
             message="审批已通过，等待恢复工作流。",
         )
     )
-    # approve  /   reject  / edit_and_approve
     # resume_payload = {"decision": "approve", **redact_snapshot(decision_payload)}
     resume_decision = "edit_and_approve" if decision_payload.get("edited_output") else decision
     resume_payload = {"decision": resume_decision, **redact_snapshot(decision_payload)}

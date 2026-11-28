@@ -1,7 +1,6 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
-from fastapi.security import HTTPBearer
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -39,7 +38,6 @@ def login(payload: LoginRequest, db: SessionDep) -> dict:
 def get_current_user(
     db: SessionDep,
     authorization: Annotated[str | None, Header()] = None,
-    _swagger_bearer=Depends(HTTPBearer(auto_error=False)),
 ) -> User:
     # 依赖层只接受 Bearer token，并在每次请求里重新校验账号可用性，保证权限收口在后端。
     """处理获取当前用户接口；完成身份、Workspace、资源归属和输入校验后返回结构化结果。"""

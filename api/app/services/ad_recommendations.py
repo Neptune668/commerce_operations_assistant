@@ -277,7 +277,7 @@ def _budget(record: PerformanceRecord | None) -> str:
 
 
 def _bid_strategy(record: PerformanceRecord | None) -> list[str]:
-    """出价策略，统一主流程中的格式、默认值和异常边界。"""
+    """bid策略，统一主流程中的格式、默认值和异常边界。"""
     # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     if record is None:
         return ["冷启动先选择点击或成交浅层目标，等有样本后再切深度转化。", "每个测试组保持同一出价策略，避免变量混杂。"]
@@ -287,7 +287,7 @@ def _bid_strategy(record: PerformanceRecord | None) -> list[str]:
 
 
 def _plan_direction(content: dict) -> str:
-    """方案方向，统一主流程中的格式、默认值和异常边界。"""
+    """方案direction，统一主流程中的格式、默认值和异常边界。"""
     # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     for key in ("visual_focus", "layout", "angle", "hook"):
         value = content.get(key)

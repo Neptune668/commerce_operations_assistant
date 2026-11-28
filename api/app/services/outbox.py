@@ -47,8 +47,6 @@ def dispatch_pending_outbox_events(*, limit: int = 50) -> int:
 def kick_outbox_dispatcher() -> None:
     """kickOutboxdispatcher；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
     from app.worker.tasks import dispatch_outbox_events_task
-    dispatch_outbox_events_task.apply_async(
-        queue=get_settings().celery_maintenance_queue)
 
 
 def _publish_event(event: OutboxEvent) -> None:

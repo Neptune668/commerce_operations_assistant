@@ -4,30 +4,27 @@ import json
 from typing import Any
 
 import httpx
-from sqlalchemy import select
+
 from app.core.config import API_DIR, Settings
-from app.db.session import SessionLocal
 from app.models import CreativePlan, CreativePlanType
 from app.services.model_settings import get_runtime_settings
 from app.services.volcengine import VolcengineCredentialsError, parse_access_key_pair, signed_json_headers
+
+
+class ImageGenerationNotConfiguredError(RuntimeError):
+    pass
+
+
+class ImageGenerationError(RuntimeError):
+    pass
 
 
 UPLOADS_DIR = API_DIR / "uploads"
 GENERATED_IMAGES_DIR = UPLOADS_DIR / "generated"
 
 
-class ImageGenerationNotConfiguredError(RuntimeError):
-    """图片生成本地配置缺失或不被支持时抛出。"""
-    pass
-
-
-class ImageGenerationError(RuntimeError):
-    """图片生成过程失败时抛出，例如任务失败、轮询超时或下载失败。"""
-    pass
-
-
 def is_image_generation_configured(settings: Settings | None = None) -> bool:
-    """判断本地是否已具备调用图片生成服务的完整配置。"""
+    """判断图片生成任务configured；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
     settings = settings or get_runtime_settings()
     return bool(
         settings.image_provider
@@ -42,34 +39,38 @@ def generate_main_image_asset(
     *,
     settings: Settings | None = None,
 ) -> dict[str, Any]:
-    """把一条主图创意方案生成为一张图片，返回可直接入库的素材字典。"""
+    """生成主流程图片素材；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     settings = settings or get_runtime_settings()
-    # 检查是否配置了图片模型
     if not is_image_generation_configured(settings):
         raise ImageGenerationNotConfiguredError("Image generation provider is not configured.")
-    # 判断image_provider是否为jimeng
-    if settings.image_provider != "jimeng":
+    if settings.image_provider not in {"dashscope", "jimeng"}:
         raise ImageGenerationNotConfiguredError(
             f"Unsupported image provider: {settings.image_provider}"
         )
-    # 判断创意方案是否为主图方案
     if creative_plan.type != CreativePlanType.MAIN_IMAGE:
         raise ImageGenerationError("Only main image plans can generate image assets.")
 
-    # 生成前清洗提示词，减少不可见字符与特殊货币符号导致接口解析失败的概率。
-    prompt = _main_image_prompt(creative_plan)
-    prompt = _sanitize_image_prompt(prompt)
-    # 判断图片模型是否是jimeng_t2i_v30
-    if settings.image_model != "jimeng_t2i_v30":
-        raise ImageGenerationNotConfiguredError("本工程图片模型必须为 jimeng_t2i_v30。")
-    # 请求图片模型，获取任务ID
-    task_id = _create_jimeng_image_task(prompt, settings)
-    # 轮询请求图片生成结果
-    result = _poll_jimeng_image_task(task_id, settings)
-    # 获取图片url
-    image_url = _extract_jimeng_image_url(result)
-    # 下载图片到 uploads目录
+    # 生成前清洗 prompt，减少不可见字符和特殊货币符号导致供应商接口解析失败的概率。
+    prompt = _sanitize_image_prompt(_main_image_prompt(creative_plan))
+    if settings.image_provider == "jimeng":
+        task_id = _create_jimeng_image_task(prompt, settings)
+        result = _poll_jimeng_image_task(task_id, settings)
+        image_url = _extract_jimeng_image_url(result)
+    elif settings.image_model == "wan2.6-t2i":
+        task_id = _create_dashscope_wan26_text_to_image_task(prompt, settings)
+        result = _poll_dashscope_task(task_id, settings)
+        image_url = _extract_dashscope_wan26_task_image_url(result)
+    elif settings.image_model == "wan2.6-image":
+        result = _create_dashscope_wan26_image(prompt, settings)
+        task_id = result.get("request_id", "")
+        image_url = _extract_dashscope_wan26_image_url(result)
+    else:
+        task_id = _create_dashscope_text_to_image_task(prompt, settings)
+        result = _poll_dashscope_task(task_id, settings)
+        image_url = _extract_dashscope_image_url(result)
     public_path = _download_generated_image(image_url, creative_plan.id)
+
     return {
         "provider": settings.image_provider,
         "model": settings.image_model,
@@ -81,8 +82,10 @@ def generate_main_image_asset(
         "created_at": int(time.time()),
     }
 
+
 def _create_jimeng_image_task(prompt: str, settings: Settings) -> str:
-    """向服务商提交一次图片生成任务，返回供应商任务 ID。"""
+    """创建jimeng图片任务，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     width, height = _parse_image_size(settings.image_size)
     payload: dict[str, Any] = {
         "req_key": settings.image_model,
@@ -91,6 +94,7 @@ def _create_jimeng_image_task(prompt: str, settings: Settings) -> str:
         "seed": -1,
         "width": width,
         "height": height,
+        "req_json": json.dumps({"return_url": True}, ensure_ascii=False),
     }
     data = _post_jimeng_json(
         settings=settings,
@@ -104,47 +108,9 @@ def _create_jimeng_image_task(prompt: str, settings: Settings) -> str:
     return task_id
 
 
-def _post_jimeng_json(
-    *,
-    settings: Settings,
-    action: str,
-    payload: dict[str, Any],
-    timeout: int,
-) -> dict[str, Any]:
-    """按统一流程发送一次服务商请求：签名、发送、校验业务状态码。"""
-    try:
-        access_key, secret_key = parse_access_key_pair(settings.image_api_key)
-    except VolcengineCredentialsError as exc:
-        raise ImageGenerationNotConfiguredError(str(exc)) from exc
-
-    base_url = settings.image_base_url or "https://visual.volcengineapi.com"
-    query = {"Action": action, "Version": "2022-08-31"}
-    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    headers = signed_json_headers(
-        access_key=access_key,
-        secret_key=secret_key,
-        method="POST",
-        url=base_url,
-        query=query,
-        body=body,
-    )
-    try:
-        with httpx.Client(timeout=timeout) as client:
-            response = client.post(base_url, params=query, content=body, headers=headers)
-            response.raise_for_status()
-            data = response.json()
-    except httpx.HTTPStatusError as exc:
-        raise ImageGenerationError(_provider_error_detail(exc.response)) from exc
-    except httpx.HTTPError as exc:
-        raise ImageGenerationError(_http_error_detail("Jimeng image request failed", exc)) from exc
-
-    code = data.get("code")
-    if code != 10000:
-        raise ImageGenerationError(str(data)[:500])
-    return data
-
 def _poll_jimeng_image_task(task_id: str, settings: Settings) -> dict[str, Any]:
-    """按配置间隔轮询任务结果，成功返回响应字典，失败或超时抛错。"""
+    """轮询jimeng图片任务，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     max_attempts = max(settings.image_poll_max_attempts, 1)
     interval = max(settings.image_poll_interval_seconds, 1)
     payload = {
@@ -169,93 +135,60 @@ def _poll_jimeng_image_task(task_id: str, settings: Settings) -> dict[str, Any]:
 
     raise ImageGenerationError("Jimeng image task timed out.")
 
-def _parse_image_size(size: str) -> tuple[int, int]:
-    """把形如 1024*1024 的尺寸字符串解析为宽高元组，无法解析时回退默认尺寸。"""
-    normalized = size.replace("*", "x").lower()
-    parts = normalized.split("x", 1)
-    if len(parts) != 2:
-        return 1328, 1328
+
+def _post_jimeng_json(
+    *,
+    settings: Settings,
+    action: str,
+    payload: dict[str, Any],
+    timeout: int,
+) -> dict[str, Any]:
+    """发送jimengJSON，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     try:
-        width = int(parts[0])
-        height = int(parts[1])
-    except ValueError:
-        return 1328, 1328
-    return max(width, 1), max(height, 1)
+        access_key, secret_key = parse_access_key_pair(settings.image_api_key)
+    except VolcengineCredentialsError as exc:
+        raise ImageGenerationNotConfiguredError(str(exc)) from exc
 
-def _main_image_prompt(creative_plan: CreativePlan) -> str:
-    """优先使用方案里的 image_prompt，缺失时按方案字段拼出可用提示词。"""
-    content = creative_plan.content or {}
-    image_prompt = content.get("image_prompt")
-    if isinstance(image_prompt, str) and image_prompt.strip():
-        return image_prompt.strip()
-
-    prompt_parts = [
-        f"电商商品主图，方案标题：{creative_plan.title}",
-        f"主文案：{content.get('headline', '')}",
-        f"副文案：{content.get('sub_headline', '')}",
-        f"画面布局：{content.get('layout', '')}",
-        f"视觉重点：{content.get('visual_focus', '')}",
-        "干净背景，商品主体清晰，商业摄影质感，适合电商首图。",
-    ]
-    return "\n".join(part for part in prompt_parts if part.strip())
-
-def _sanitize_image_prompt(prompt: str) -> str:
-    """清理服务商协议可能不接受的特殊字符，保留提示词的业务语义。"""
-    replacements = {
-        "\u00a5": "yuan",
-        "\uffe5": "yuan",
-        "\u201c": '"',
-        "\u201d": '"',
-        "\u2018": "'",
-        "\u2019": "'",
-        "\u2028": "\n",
-        "\u2029": "\n",
-    }
-    for old, new in replacements.items():
-        prompt = prompt.replace(old, new)
-
-    return "".join(
-        char for char in prompt if char in {"\n", "\t"} or ord(char) >= 32
-    ).strip()
-
-def _download_generated_image(image_url: str, creative_plan_id: int) -> str:
-    """把供应商临时地址的图片下载到本地，返回项目对外可访问的本地路径。"""
-    GENERATED_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-    filename = f"main-image-plan-{creative_plan_id}-{uuid.uuid4().hex}.png"
-    output_path = GENERATED_IMAGES_DIR / filename
-
-    # 把供应商临时 URL 下载到本地 uploads，避免外部链接过期后素材记录失效。
+    base_url = settings.image_base_url or "https://visual.volcengineapi.com"
+    query = {"Action": action, "Version": "2022-08-31"}
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    headers = signed_json_headers(
+        access_key=access_key,
+        secret_key=secret_key,
+        method="POST",
+        url=base_url,
+        query=query,
+        body=body,
+    )
     try:
-        with httpx.Client(timeout=120, follow_redirects=True) as client:
-            response = client.get(image_url)
+        with httpx.Client(timeout=timeout) as client:
+            response = client.post(base_url, params=query, content=body, headers=headers)
             response.raise_for_status()
+            data = response.json()
+    except httpx.HTTPStatusError as exc:
+        raise ImageGenerationError(_dashscope_error_detail(exc.response)) from exc
     except httpx.HTTPError as exc:
-        raise ImageGenerationError(_http_error_detail("Generated image download failed", exc)) from exc
+        raise ImageGenerationError(_http_error_detail("Jimeng image request failed", exc)) from exc
 
-    output_path.write_bytes(response.content)
-    return f"/uploads/generated/{filename}"
+    code = data.get("code") or data.get("Code")
+    if code not in {None, 0, 10000, "0", "10000"}:
+        raise ImageGenerationError(str(data)[:500])
+    return data
 
-def _provider_error_detail(response: httpx.Response) -> str:
-    """把服务商的错误响应整理成一段可写入日志与异常的简短文本。"""
-    try:
-        data = response.json()
-    except ValueError:
-        return response.text[:500]
-    return str(data)[:500]
-
-def _http_error_detail(message: str, exc: httpx.HTTPError) -> str:
-    """统一格式化 HTTP 异常信息，便于区分网络错误与业务错误。"""
-    return f"{message}: {type(exc).__name__}: {exc}"
 
 def _extract_jimeng_task_id(data: dict[str, Any]) -> str:
-    """从服务商响应的多个可能容器中提取任务 ID，取不到返回空字符串。"""
+    """提取jimeng任务id，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     for container in (data.get("data"), data.get("Result"), data.get("output"), data):
         if isinstance(container, dict) and isinstance(container.get("task_id"), str):
             return container["task_id"]
     return ""
 
+
 def _jimeng_status(data: dict[str, Any]) -> str:
-    """读取任务状态并统一转为小写，取不到返回空字符串。"""
+    """jimeng状态，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     container = data.get("data")
     if isinstance(container, dict) and isinstance(container.get("status"), str):
         return container["status"].lower()
@@ -263,8 +196,10 @@ def _jimeng_status(data: dict[str, Any]) -> str:
         return data["status"].lower()
     return ""
 
+
 def _extract_jimeng_image_url(data: dict[str, Any]) -> str:
-    """从响应中提取图片地址，支持单值与列表两种形式。"""
+    """提取jimeng图片URL，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     containers = [data.get("data"), data.get("Result"), data.get("output"), data]
     for container in containers:
         if not isinstance(container, dict):
@@ -282,11 +217,381 @@ def _extract_jimeng_image_url(data: dict[str, Any]) -> str:
             raise ImageGenerationError("Jimeng returned base64 image data; set return_url=true.")
     return ""
 
-if __name__ == '__main__':
-    with SessionLocal() as db:
-        creative_plan = db.scalars(
-            select(CreativePlan).where(CreativePlan.id == 1)
-        ).first()
 
-        result = generate_main_image_asset(creative_plan)
-        print(result)
+def _parse_image_size(size: str) -> tuple[int, int]:
+    """解析图片size，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
+    normalized = size.replace("*", "x").lower()
+    parts = normalized.split("x", 1)
+    if len(parts) != 2:
+        return 1328, 1328
+    try:
+        width = int(parts[0])
+        height = int(parts[1])
+    except ValueError:
+        return 1328, 1328
+    return max(width, 1), max(height, 1)
+
+
+def _main_image_prompt(creative_plan: CreativePlan) -> str:
+    """主流程图片prompt，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
+    content = creative_plan.content or {}
+    image_prompt = content.get("image_prompt")
+    if isinstance(image_prompt, str) and image_prompt.strip():
+        return image_prompt.strip()
+
+    prompt_parts = [
+        f"电商商品主图，方案标题：{creative_plan.title}",
+        f"主文案：{content.get('headline', '')}",
+        f"副文案：{content.get('sub_headline', '')}",
+        f"画面布局：{content.get('layout', '')}",
+        f"视觉重点：{content.get('visual_focus', '')}",
+        "干净背景，商品主体清晰，商业摄影质感，适合电商首图。",
+    ]
+    return "\n".join(part for part in prompt_parts if part.strip())
+
+
+def _sanitize_image_prompt(prompt: str) -> str:
+    """清洗图片prompt，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
+    replacements = {
+        "\u00a5": "yuan",
+        "\uffe5": "yuan",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u2028": "\n",
+        "\u2029": "\n",
+    }
+    for old, new in replacements.items():
+        prompt = prompt.replace(old, new)
+
+    return "".join(
+        char for char in prompt if char in {"\n", "\t"} or ord(char) >= 32
+    ).strip()
+
+
+def _create_dashscope_text_to_image_task(prompt: str, settings: Settings) -> str:
+    """创建dashscope文本to图片任务，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
+    url = _join_base_url(settings.image_base_url or "", "services/aigc/text2image/image-synthesis")
+    payload = {
+        "model": settings.image_model,
+        "input": {
+            "prompt": prompt,
+        },
+        "parameters": {
+            "size": settings.image_size,
+            "n": 1,
+            "prompt_extend": True,
+            "watermark": False,
+        },
+    }
+    try:
+        response = _post_dashscope_json(
+            url,
+            headers=_dashscope_headers(settings, async_request=True),
+            payload=payload,
+            timeout=120,
+        )
+    except httpx.HTTPStatusError as exc:
+        raise ImageGenerationError(_dashscope_error_detail(exc.response)) from exc
+    except httpx.HTTPError as exc:
+        raise ImageGenerationError(_http_error_detail("DashScope image task creation failed", exc)) from exc
+
+    data = response.json()
+    task_id = data.get("output", {}).get("task_id")
+    if not isinstance(task_id, str) or not task_id:
+        raise ImageGenerationError("DashScope response did not contain task_id.")
+    return task_id
+
+
+def _create_dashscope_wan26_image(prompt: str, settings: Settings) -> dict[str, Any]:
+    """创建dashscopewan26图片，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
+    url = _join_base_url(
+        settings.image_base_url or "",
+        "services/aigc/multimodal-generation/generation",
+    )
+    payload = {
+        "model": settings.image_model,
+        "input": {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "text": prompt,
+                        },
+                    ],
+                },
+            ],
+        },
+        "parameters": {
+            "size": settings.image_size,
+            "n": 1,
+            "prompt_extend": True,
+            "watermark": False,
+        },
+    }
+    try:
+        response = _post_dashscope_json(
+            url,
+            headers=_dashscope_headers(settings),
+            payload=payload,
+            timeout=180,
+        )
+    except httpx.HTTPStatusError as exc:
+        raise ImageGenerationError(_dashscope_error_detail(exc.response)) from exc
+    except httpx.HTTPError as exc:
+        raise ImageGenerationError(_http_error_detail("DashScope wan2.6 image generation failed", exc)) from exc
+
+    return response.json()
+
+
+def _create_dashscope_wan26_text_to_image_task(prompt: str, settings: Settings) -> str:
+    """创建dashscopewan26文本to图片任务，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
+    url = _join_base_url(
+        settings.image_base_url or "",
+        "services/aigc/image-generation/generation",
+    )
+    payload = {
+        "model": settings.image_model,
+        "input": {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "text": prompt,
+                        },
+                    ],
+                },
+            ],
+        },
+        "parameters": {
+            "prompt_extend": True,
+            "watermark": False,
+            "n": 1,
+            "negative_prompt": "",
+            "size": settings.image_size,
+        },
+    }
+    try:
+        response = _post_dashscope_json(
+            url,
+            headers=_dashscope_headers(settings, async_request=True),
+            payload=payload,
+            timeout=120,
+        )
+    except httpx.HTTPStatusError as exc:
+        raise ImageGenerationError(_dashscope_error_detail(exc.response)) from exc
+    except httpx.HTTPError as exc:
+        raise ImageGenerationError(
+            _http_error_detail("DashScope wan2.6 text-to-image task creation failed", exc)
+        ) from exc
+
+    data = response.json()
+    task_id = data.get("output", {}).get("task_id")
+    if not isinstance(task_id, str) or not task_id:
+        raise ImageGenerationError("DashScope wan2.6 response did not contain task_id.")
+    return task_id
+
+
+def _poll_dashscope_task(task_id: str, settings: Settings) -> dict[str, Any]:
+    """轮询dashscope任务，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
+    url = _join_base_url(settings.image_base_url or "", f"tasks/{task_id}")
+    max_attempts = max(settings.image_poll_max_attempts, 1)
+    interval = max(settings.image_poll_interval_seconds, 1)
+
+    try:
+        for _attempt in range(max_attempts):
+            data = _get_dashscope_json(
+                url,
+                headers=_dashscope_headers(settings, include_content_type=False),
+                timeout=30,
+            )
+            status = data.get("output", {}).get("task_status")
+            if status == "SUCCEEDED":
+                return data
+            if status in {"FAILED", "CANCELED", "UNKNOWN"}:
+                raise ImageGenerationError(f"DashScope image task ended with status: {status}")
+            time.sleep(interval)
+    except httpx.HTTPStatusError as exc:
+        raise ImageGenerationError(_dashscope_error_detail(exc.response)) from exc
+    except httpx.HTTPError as exc:
+        raise ImageGenerationError(_http_error_detail("DashScope image task polling failed", exc)) from exc
+
+    raise ImageGenerationError("DashScope image task timed out.")
+
+
+def _get_dashscope_json(
+    url: str,
+    *,
+    headers: dict[str, str],
+    timeout: int,
+) -> dict[str, Any]:
+    """获取dashscopeJSON，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
+    last_error: httpx.HTTPError | None = None
+    for attempt in range(3):
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                response = client.get(url, headers=headers)
+                response.raise_for_status()
+                return response.json()
+        except httpx.HTTPStatusError:
+            raise
+        except httpx.HTTPError as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(2 + attempt * 2)
+
+    assert last_error is not None
+    raise last_error
+
+
+def _extract_dashscope_image_url(result: dict[str, Any]) -> str:
+    """提取dashscope图片URL，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
+    output = result.get("output", {})
+    results = output.get("results", [])
+    if not isinstance(results, list) or not results:
+        raise ImageGenerationError("DashScope image task did not return results.")
+
+    image_url = results[0].get("url")
+    if not isinstance(image_url, str) or not image_url:
+        raise ImageGenerationError("DashScope image result did not contain url.")
+    return image_url
+
+
+def _extract_dashscope_wan26_image_url(result: dict[str, Any]) -> str:
+    """提取dashscopewan26图片URL，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
+    choices = result.get("output", {}).get("choices", [])
+    if not isinstance(choices, list) or not choices:
+        raise ImageGenerationError("DashScope wan2.6 response did not return choices.")
+
+    content = choices[0].get("message", {}).get("content", [])
+    if not isinstance(content, list):
+        raise ImageGenerationError("DashScope wan2.6 response did not return content.")
+
+    for item in content:
+        if isinstance(item, dict) and isinstance(item.get("image"), str):
+            return item["image"]
+
+    raise ImageGenerationError("DashScope wan2.6 response did not contain image url.")
+
+
+def _extract_dashscope_wan26_task_image_url(result: dict[str, Any]) -> str:
+    """提取dashscopewan26任务图片URL，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
+    output = result.get("output", {})
+    choices = output.get("choices", [])
+    if isinstance(choices, list):
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            content = choice.get("message", {}).get("content", [])
+            if not isinstance(content, list):
+                continue
+            for item in content:
+                if isinstance(item, dict) and isinstance(item.get("image"), str):
+                    return item["image"]
+
+    results = output.get("results", [])
+    if isinstance(results, list):
+        for item in results:
+            if isinstance(item, dict) and isinstance(item.get("url"), str):
+                return item["url"]
+
+    raise ImageGenerationError("DashScope wan2.6 task result did not contain image url.")
+
+
+def _download_generated_image(image_url: str, creative_plan_id: int) -> str:
+    """下载生成图片，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
+    GENERATED_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+    filename = f"main-image-plan-{creative_plan_id}-{uuid.uuid4().hex}.png"
+    output_path = GENERATED_IMAGES_DIR / filename
+
+    # 将供应商临时 URL 下载到本地 uploads，避免外部链接过期后素材审核记录失效。
+    try:
+        with httpx.Client(timeout=120, follow_redirects=True) as client:
+            response = client.get(image_url)
+            response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise ImageGenerationError(_http_error_detail("Generated image download failed", exc)) from exc
+
+    output_path.write_bytes(response.content)
+    return f"/uploads/generated/{filename}"
+
+
+def _join_base_url(base_url: str, path: str) -> str:
+    """拼接baseURL，统一主流程中的格式、默认值和异常边界。"""
+    return f"{base_url.strip().rstrip('/')}/{path.strip('/')}"
+
+
+def _dashscope_headers(
+    settings: Settings,
+    *,
+    async_request: bool = False,
+    include_content_type: bool = True,
+) -> dict[str, str]:
+    """dashscopeheaders，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
+    headers = {
+        "Authorization": f"Bearer {settings.image_api_key}",
+    }
+    if include_content_type:
+        headers["Content-Type"] = "application/json"
+    if async_request:
+        headers["X-DashScope-Async"] = "enable"
+    if settings.image_workspace_id:
+        headers["X-DashScope-WorkSpace"] = settings.image_workspace_id
+    return headers
+
+
+def _post_dashscope_json(
+    url: str,
+    *,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+    timeout: int,
+) -> httpx.Response:
+    """发送dashscopeJSON，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
+    last_error: httpx.HTTPError | None = None
+    for attempt in range(3):
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                response = client.post(url, headers=headers, json=payload)
+                response.raise_for_status()
+                return response
+        except httpx.HTTPStatusError:
+            raise
+        except httpx.HTTPError as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(3 + attempt * 2)
+
+    assert last_error is not None
+    raise last_error
+
+
+def _dashscope_error_detail(response: httpx.Response) -> str:
+    """dashscope错误详情，统一主流程中的格式、默认值和异常边界。"""
+    try:
+        data = response.json()
+    except ValueError:
+        return response.text[:500]
+    return str(data)[:500]
+
+
+def _http_error_detail(message: str, exc: httpx.HTTPError) -> str:
+    """HTTP错误详情，统一主流程中的格式、默认值和异常边界。"""
+    return f"{message}: {type(exc).__name__}: {exc}"

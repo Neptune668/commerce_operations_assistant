@@ -4,24 +4,14 @@ from typing import Final
 from app.models import AgentRiskLevel
 
 
-# 定义多Agent设计中规划的9个Agent的key
-# 协调者Agent
 COORDINATOR_AGENT: Final = "ecommerce_operations_agent"
-# 市场分析Agent
 MARKET_INTELLIGENCE_AGENT: Final = "market_intelligence_agent"
-# 商品策略Agent
 PRODUCT_STRATEGY_AGENT: Final = "product_strategy_agent"
-# 创意策略Agent（生成主图方案和视频脚本）
 CREATIVE_STRATEGY_AGENT: Final = "creative_strategy_agent"
-# 内容生产Agent（生成图片和视频）
 CONTENT_PRODUCTION_AGENT: Final = "content_production_agent"
-# 成长实验Agent
 GROWTH_EXPERIMENT_AGENT: Final = "growth_experiment_agent"
-# 性能评估Agent
 PERFORMANCE_REVIEW_AGENT: Final = "performance_review_agent"
-# 库存操作Agent
 INVENTORY_OPERATIONS_AGENT: Final = "inventory_operations_agent"
-# 质量合规Agent
 QUALITY_COMPLIANCE_AGENT: Final = "quality_compliance_agent"
 
 
@@ -32,6 +22,7 @@ class AgentDefinition:
     description: str
     tool_allowlist: frozenset[str]
 
+
 @dataclass(frozen=True)
 class ToolDefinition:
     key: str
@@ -39,6 +30,7 @@ class ToolDefinition:
     description: str
     idempotent: bool = True
     owner_only: bool = False
+
 
 @dataclass(frozen=True)
 class WorkflowDefinition:
@@ -60,27 +52,52 @@ class WorkflowDefinition:
             "policies": {"risk_policy": "1.0.0", "tool_gateway": "1.0.0"},
         }
 
-# 工具注册表
-TOOL_REGISTRY: Final[dict[str,ToolDefinition]] = {
+
+TOOL_REGISTRY: Final[dict[str, ToolDefinition]] = {
     "product.read": ToolDefinition("product.read", AgentRiskLevel.R0, "读取商品与经营上下文"),
     "store.read": ToolDefinition("store.read", AgentRiskLevel.R0, "读取店铺组合与经营上下文"),
     "competitor.read": ToolDefinition("competitor.read", AgentRiskLevel.R0, "读取竞品与监控快照"),
-    "competitor.monitor.run": ToolDefinition("competitor.monitor.run", AgentRiskLevel.R1, "生成竞品监控快照"),
+    "competitor.monitor.run": ToolDefinition(
+        "competitor.monitor.run", AgentRiskLevel.R1, "生成竞品监控快照"
+    ),
     "diagnosis.draft": ToolDefinition("diagnosis.draft", AgentRiskLevel.R1, "生成商品诊断草稿"),
-    "creative.plan.draft": ToolDefinition("creative.plan.draft", AgentRiskLevel.R1, "生成可编辑创意方案"),
-    "content.image.generate": ToolDefinition("content.image.generate", AgentRiskLevel.R1, "调用图片供应商生成候选素材"),
-    "content.video.generate": ToolDefinition( "content.video.generate", AgentRiskLevel.R1, "调用视频供应商生成候选素材"),
-    "promotion.link.draft": ToolDefinition("promotion.link.draft", AgentRiskLevel.R1, "生成推广链接配置草稿"),
-    "ad.recommendation.draft": ToolDefinition("ad.recommendation.draft", AgentRiskLevel.R1, "生成投放建议草稿"),
-    "ad.experiment.create": ToolDefinition("ad.experiment.create", AgentRiskLevel.R2, "创建正式投放实验"),
-    "performance.review.draft": ToolDefinition("performance.review.draft", AgentRiskLevel.R1, "生成周期经营复盘草稿"),
+    "creative.plan.draft": ToolDefinition(
+        "creative.plan.draft", AgentRiskLevel.R1, "生成可编辑创意方案"
+    ),
+    "content.image.generate": ToolDefinition(
+        "content.image.generate", AgentRiskLevel.R1, "调用图片供应商生成候选素材"
+    ),
+    "content.video.generate": ToolDefinition(
+        "content.video.generate", AgentRiskLevel.R1, "调用视频供应商生成候选素材"
+    ),
+    "promotion.link.draft": ToolDefinition(
+        "promotion.link.draft", AgentRiskLevel.R1, "生成推广链接配置草稿"
+    ),
+    "ad.recommendation.draft": ToolDefinition(
+        "ad.recommendation.draft", AgentRiskLevel.R1, "生成投放建议草稿"
+    ),
+    "ad.experiment.create": ToolDefinition(
+        "ad.experiment.create", AgentRiskLevel.R2, "创建正式投放实验"
+    ),
+    "performance.review.draft": ToolDefinition(
+        "performance.review.draft", AgentRiskLevel.R1, "生成周期经营复盘草稿"
+    ),
     "inventory.read": ToolDefinition("inventory.read", AgentRiskLevel.R0, "读取 SKU 与库存状态"),
-    "inventory.advice.draft": ToolDefinition("inventory.advice.draft", AgentRiskLevel.R1, "生成库存建议草稿"),
-    "inventory.adjust": ToolDefinition("inventory.adjust",AgentRiskLevel.R3,"写入真实库存调整流水",owner_only=True,),
-    "artifact.persist": ToolDefinition("artifact.persist", AgentRiskLevel.R2, "采用草稿并写入正式业务对象")
+    "inventory.advice.draft": ToolDefinition(
+        "inventory.advice.draft", AgentRiskLevel.R1, "生成库存建议草稿"
+    ),
+    "inventory.adjust": ToolDefinition(
+        "inventory.adjust",
+        AgentRiskLevel.R3,
+        "写入真实库存调整流水",
+        owner_only=True,
+    ),
+    "artifact.persist": ToolDefinition(
+        "artifact.persist", AgentRiskLevel.R2, "采用草稿并写入正式业务对象"
+    ),
 }
 
-# Agent注册表
+
 AGENT_REGISTRY: Final[dict[str, AgentDefinition]] = {
     COORDINATOR_AGENT: AgentDefinition(
         COORDINATOR_AGENT,
@@ -140,7 +157,7 @@ AGENT_REGISTRY: Final[dict[str, AgentDefinition]] = {
     ),
 }
 
-# 工作流注册表
+
 WORKFLOW_REGISTRY: Final[dict[str, WorkflowDefinition]] = {
     "product_diagnosis_optimization": WorkflowDefinition(
         "product_diagnosis_optimization",
@@ -214,21 +231,21 @@ WORKFLOW_REGISTRY: Final[dict[str, WorkflowDefinition]] = {
 }
 
 
-# 工作流别名： 在基础工作流图中，商品诊断与优化的流程名称为 "product_operation"
-#  但是在WORKFLOW_REGISTRY中，商品诊断与优化的key为 "product_diagnosis_optimization"
 WORKFLOW_ALIASES: Final = {"product_operation": "product_diagnosis_optimization"}
 
+
 def get_workflow(workflow_key: str) -> WorkflowDefinition:
+    """获取工作流，只从版本化注册表解析职责、工具白名单和工作流定义。"""
     canonical_key = WORKFLOW_ALIASES.get(workflow_key, workflow_key)
     workflow = WORKFLOW_REGISTRY.get(canonical_key)
     if workflow is None or not workflow.enabled:
         raise KeyError(f"Workflow is not registered or enabled: {workflow_key}")
     return workflow
 
+
 def route_intent(intent: str) -> WorkflowDefinition:
-    """
-    intent就是运营人员输入的自然语言：“请帮我对这个商品进行诊断和创意方案生成”
-    """
+    """路由intent，依据结构化状态选择下一个已注册节点，避免隐式或无界跳转。"""
+    # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
     normalized = intent.strip().lower()
     keyword_routes = (
         (("库存", "缺货", "补货", "盘点", "inventory"), "inventory_operations"),
@@ -242,6 +259,7 @@ def route_intent(intent: str) -> WorkflowDefinition:
         if any(keyword in normalized for keyword in keywords):
             return WORKFLOW_REGISTRY[workflow_key]
     return WORKFLOW_REGISTRY["product_diagnosis_optimization"]
+
 
 def is_workflow_enabled(workspace_settings: dict, workflow_key: str) -> bool:
     """判断工作流enabled，只从版本化注册表解析职责、工具白名单和工作流定义。"""

@@ -9,6 +9,7 @@ from app.models import GeneratedAsset, PerformanceRecord, Product, PromotionLink
 def build_ad_experiment_payload(product: Product) -> dict[str, Any]:
     # 实验计划从已有素材、链接和回填数据中挑候选项，产出 draft，真实投放仍由运营人工创建或确认。
     """构建投放实验载荷；集中执行业务校验、状态变更与持久化，并返回可验证结果。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     best_asset = _best_asset(product.generated_assets, product.performance_records)
     best_link = _best_link(product.promotion_links, product.performance_records)
     primary_selling_point = product.selling_points[0] if product.selling_points else "核心卖点"
@@ -62,7 +63,8 @@ def _best_by_records(
     records: list[PerformanceRecord],
     record_field: str,
 ) -> dict[str, Any] | None:
-    """按记录挑选最佳项，统一主流程中的格式、默认值和异常边界。"""
+    """最佳byrecords，统一主流程中的格式、默认值和异常边界。"""
+    # 按“输入归一化 → 业务校验 → 状态或持久化”推进，异常不得留下半完成结果。
     if not items:
         return None
 

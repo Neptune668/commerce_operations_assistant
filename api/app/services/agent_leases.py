@@ -12,25 +12,31 @@ from app.models import AgentRun, AgentRunStatus
 
 
 LEASE_DURATION = timedelta(minutes=5)
-HEARTBEAT_INTERVAL_SECONDS = 60   # 续约守护进程轮询周期，单位秒
+HEARTBEAT_INTERVAL_SECONDS = 60
+
 
 class AgentLeaseLostError(RuntimeError):
     pass
 
-# 创建租约owner
+
 def create_lease_owner(prefix: str, run_id: int) -> str:
-    """创建租约owner"""
+    """创建租约owner；只交换结构化 Agent 状态或受控工具结果，支持 checkpoint、审计与恢复。"""
     return f"{prefix}:{run_id}:{uuid4()}"
 
-# 根据run_id查询租约AgentRun，并进行校验
-def require_active_lease( db: Session, *, run_id: int, lease_owner: str | None, for_update: bool = False) -> AgentRun:
-    """校验并获取有效租约"""
-    # 1.查询租约（添加行锁）
+
+def require_active_lease(
+    db: Session,
+    *,
+    run_id: int,
+    lease_owner: str | None,
+    for_update: bool = False,
+) -> AgentRun:
+    """校验并获取有效租约；只交换结构化 Agent 状态或受控工具结果，支持 checkpoint、审计与恢复。"""
+    # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
     statement = select(AgentRun).where(AgentRun.id == run_id)
     if for_update:
         statement = statement.with_for_update().execution_options(populate_existing=True)
     run = db.scalar(statement)
-    # 2.校验租约
     now = datetime.now(UTC)
     if run is None:
         raise AgentLeaseLostError("Agent run does not exist")
@@ -38,20 +44,12 @@ def require_active_lease( db: Session, *, run_id: int, lease_owner: str | None, 
         raise AgentLeaseLostError(f"Agent run is no longer running: {run.status.value}")
     if lease_owner is not None and run.lease_owner != lease_owner:
         raise AgentLeaseLostError("Agent run lease has been replaced")
-    # 判断用户是否取消任务
     if run.cancel_requested_at is not None:
         raise AgentLeaseLostError("Agent run cancellation was requested")
-    # 如果任务已经超时，抛出异常
     if run.timeout_at is not None and _is_due(run.timeout_at, now):
         raise AgentLeaseLostError("Agent run exceeded timeout")
     return run
 
-# 检验AgentRun是否超时
-def _is_due(value: datetime, now: datetime) -> bool:
-    """判断到期；只交换结构化 Agent 状态或受控工具结果，支持 checkpoint、审计与恢复。"""
-    if value.tzinfo is None:
-        return value <= now.replace(tzinfo=None)
-    return value <= now
 
 def renew_active_lease(db: Session, *, run: AgentRun) -> None:
     """renew有效租约；只交换结构化 Agent 状态或受控工具结果，支持 checkpoint、审计与恢复。"""
@@ -60,11 +58,14 @@ def renew_active_lease(db: Session, *, run: AgentRun) -> None:
 
 @contextmanager
 def agent_lease_heartbeat(run_id: int, lease_owner: str) -> Generator[None, None, None]:
-    """Agent租约心跳续租"""
+    # 长耗时模型或供应商调用期间独立续租；fencing token 防止旧 Worker 在回收后写回终态。
+    """Agent租约心跳续租；只交换结构化 Agent 状态或受控工具结果，支持 checkpoint、审计与恢复。"""
+    # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
     stopped = Event()
 
     def heartbeat() -> None:
         """心跳续租；只交换结构化 Agent 状态或受控工具结果，支持 checkpoint、审计与恢复。"""
+        # 节点只通过结构化状态和受控工具交换数据，禁止绕过策略边界写入结果。
         while not stopped.wait(HEARTBEAT_INTERVAL_SECONDS):
             now = datetime.now(UTC)
             try:
@@ -94,3 +95,10 @@ def agent_lease_heartbeat(run_id: int, lease_owner: str) -> Generator[None, None
     finally:
         stopped.set()
         thread.join(timeout=1)
+
+
+def _is_due(value: datetime, now: datetime) -> bool:
+    """判断到期；只交换结构化 Agent 状态或受控工具结果，支持 checkpoint、审计与恢复。"""
+    if value.tzinfo is None:
+        return value <= now.replace(tzinfo=None)
+    return value <= now

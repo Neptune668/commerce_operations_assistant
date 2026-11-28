@@ -51,6 +51,7 @@ def run_competitor_monitor(db: Session, monitor: CompetitorMonitor) -> Competito
     # 无论成功失败都推进下次检查时间，避免异常链接在同一轮调度里被无限重复拉取。
     monitor.last_checked_at = checked_at
     monitor.next_check_at = next_check_time(monitor.interval_days, checked_at)
+    monitor.last_snapshot_id = snapshot.id
     return snapshot
 
 
